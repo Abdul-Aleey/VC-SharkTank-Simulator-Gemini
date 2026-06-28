@@ -4,6 +4,96 @@ All diagrams are written in [Mermaid](https://mermaid.js.org/) and render native
 
 ---
 
+## Multi-Agent System Architecture
+
+How the 5 ADK agents are wired together. Each agent has its own isolated ADK `Runner` and `InMemorySession` — they share no state. The orchestrator is the only component that knows about all five.
+
+```mermaid
+graph TB
+    WS["server.py\nWebSocket handler\n/ws-simulate"]
+
+    subgraph ORC["SimulationOrchestrator — the brain"]
+        direction TB
+        EQ["asyncio.Queue\nevent_queue\n→ streams events to WebSocket"]
+        BQ["_bargain_action Queue\nREAL mode: waits for user\nbargain choice"]
+        FRQ["_founder_response Queue\nREAL mode: waits for user\ntyped answer"]
+    end
+
+    subgraph FA["FounderAgent  (AI mode only)"]
+        FAG["ADK Agent\nInstruction: pitch writer,\nresponder, negotiator"]
+        FAS["InMemorySession\nfounder_user\nisolated history"]
+        FAR["Runner\napp=shark_tank"]
+        FAG --- FAS
+        FAG --- FAR
+    end
+
+    subgraph VA["VincentAgent"]
+        VAG["ADK Agent\nFocus: Finance · Valuation\nMargins · Profitability"]
+        VAS["InMemorySession\nvincent_user"]
+        VAR["Runner"]
+        VAG --- VAS
+        VAG --- VAR
+    end
+
+    subgraph MA["MarcusAgent"]
+        MAG["ADK Agent\nFocus: Tech · Architecture\nDefensibility · Scale"]
+        MAS["InMemorySession\nmarcus_user"]
+        MAR["Runner"]
+        MAG --- MAS
+        MAG --- MAR
+    end
+
+    subgraph BA["BeatriceAgent"]
+        BAG["ADK Agent\nFocus: Brand · Leadership\nMarketing · Trust"]
+        BAS["InMemorySession\nbeatrice_user"]
+        BAR["Runner"]
+        BAG --- BAS
+        BAG --- BAR
+    end
+
+    subgraph LA["LeonaAgent"]
+        LAG["ADK Agent\nFocus: GTM · Operations\nGrowth · Mass Appeal"]
+        LAS["InMemorySession\nleona_user"]
+        LAR["Runner"]
+        LAG --- LAS
+        LAG --- LAR
+    end
+
+    WS <-->|"send actions\nreceive events"| ORC
+
+    ORC -->|"_run_founder_agent()\nsequential"| FA
+    FA -->|"pitch / response /\nacceptance speech"| ORC
+
+    ORC -->|"asyncio.gather()\n4 agents in parallel"| VA
+    ORC -->|"asyncio.gather()\n4 agents in parallel"| MA
+    ORC -->|"asyncio.gather()\n4 agents in parallel"| BA
+    ORC -->|"asyncio.gather()\n4 agents in parallel"| LA
+
+    VA -->|"JSON: confidence\nthoughtBubble strengths\nweaknesses risks"| ORC
+    MA -->|"JSON: confidence\nthoughtBubble strengths\nweaknesses risks"| ORC
+    BA -->|"JSON: confidence\nthoughtBubble strengths\nweaknesses risks"| ORC
+    LA -->|"JSON: confidence\nthoughtBubble strengths\nweaknesses risks"| ORC
+
+    ORC -->|"typed events\npitch · question ·\nfounder_response · banter ·\nexit_speech · investor_update ·\nbargaining_start · report"| EQ
+    EQ -->|"JSON frames\nover WebSocket"| WS
+
+    style FA fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
+    style VA fill:#1a3a2a,stroke:#22c55e,color:#e2e8f0
+    style MA fill:#3a1a1a,stroke:#ef4444,color:#e2e8f0
+    style BA fill:#2d1a3a,stroke:#a855f7,color:#e2e8f0
+    style LA fill:#3a2a1a,stroke:#f59e0b,color:#e2e8f0
+    style ORC fill:#1e2a3a,stroke:#64748b,color:#e2e8f0
+```
+
+**Key design decisions this diagram illustrates:**
+- Each agent has a completely isolated `InMemorySession` — Vincent has no idea what Marcus remembers
+- `asyncio.gather()` runs all 4 investor evaluations simultaneously (true parallelism, not sequential)
+- The orchestrator never lets agents talk to each other directly — all coordination goes through Python code
+- FounderAgent is only invoked in AI mode; REAL mode uses `_founder_response` queue instead
+- One event queue serialises all output regardless of which agent produced it
+
+---
+
 ## Table of Contents
 
 1. [Application Screen Flow](#1-application-screen-flow)
