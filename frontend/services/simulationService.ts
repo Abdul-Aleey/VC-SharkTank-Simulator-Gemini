@@ -28,8 +28,10 @@ export type SimEvent =
 
 // In development: http://localhost:5000
 // In production:  set VITE_BACKEND_URL=https://your-service.run.app in .env
+// Local dev: set VITE_BACKEND_URL=http://localhost:5000 in frontend/.env
+// Production (unified): not set → uses same origin (frontend and backend are one service)
 const BACKEND_BASE = (import.meta.env.VITE_BACKEND_URL as string | undefined)?.replace(/\/$/, '')
-  ?? 'http://localhost:5000';
+  ?? window.location.origin;
 
 // Convert http(s) → ws(s) for the WebSocket connection
 const WS_BASE = BACKEND_BASE.replace(/^http/, 'ws');

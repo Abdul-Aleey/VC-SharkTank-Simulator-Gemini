@@ -26,6 +26,8 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from simulation.orchestrator import SimulationOrchestrator
 
@@ -184,6 +186,28 @@ async def ws_simulate(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
+
+
+# ── Serve the built React frontend (present in production, absent in local dev) ──
+# API routes above are matched first. This catch-all handles SPA navigation.
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(STATIC_DIR):
+    # Serve hashed JS/CSS assets
+    assets_dir = os.path.join(STATIC_DIR, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def serve_root():
+        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        # Serve existing static files (favicon, etc.); fall back to index.html for SPA routes
+        candidate = os.path.join(STATIC_DIR, full_path)
+        if os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
 if __name__ == "__main__":
