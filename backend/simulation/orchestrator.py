@@ -304,15 +304,18 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         await self._emit_investor_update(inv_id)
 
         history_str = self._history_str(last=10)
+        founder_name = self.config.get('founderName', 'the founder')
         prompt = f"""GENERATE QUESTION
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Ask: {self.config.get('askAmount')} for {self.config.get('askEquity')}%
 Description: {self.config.get('description')}
+Founder's name: {founder_name}
 
 Recent conversation:
 {history_str}
 
 One sharp question targeting your focus area. Max 40 words. No meta-text.
+NAMING RULE: Address the founder as "{founder_name}", never as "he", "she", "sir", "ma'am", or any pronoun.
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
         text = await self._run_investor_agent(inv_id, prompt)
@@ -434,14 +437,16 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         state       = self.investor_states[inv_id]
         history_str = self._history_str(last=10)
 
+        founder_name = self.config.get('founderName', 'the founder')
         prompt = f"""EVALUATE RESPONSE
 You are evaluating as {INVESTOR_PERSONAS[inv_id]['name']}.
 
-Founder said: "{founder_response}"
+Founder ({founder_name}) said: "{founder_response}"
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Ask: {self.config.get('askAmount')} for {self.config.get('askEquity')}%
 Your current confidence: {state['confidence']}%
 Round: {round_num} of {self.rounds}
+NAMING RULE: In thoughtBubble text use "{founder_name}" not "he/she/the founder".
 
 Conversation history:
 {history_str}
@@ -488,12 +493,16 @@ Language for text fields: {'Japanese' if self.is_ja else 'English'}"""
         )
         history_str   = self._history_str(last=6)
 
+        founder_name = self.config.get('founderName', 'the founder')
         prompt = f"""GENERATE BANTER
 You are {INVESTOR_PERSONAS[speaker]['name']} reacting spontaneously to the pitch.
 
 CRITICAL: You may ONLY reference investors who have already spoken.
 Investors you may reference: {referenceable}
 Do NOT mention any other investor by name.
+
+NAMING RULE: Use full names — never pronouns ("he", "she", "they") for any investor.
+When referring to the founder, use "{founder_name}", not "he", "she", or "the founder".
 
 Recent conversation:
 {history_str}

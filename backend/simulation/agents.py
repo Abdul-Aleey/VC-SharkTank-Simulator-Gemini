@@ -20,24 +20,28 @@ INVESTOR_PERSONAS = {
     "vincent": {
         "name": "Vincent Vance",
         "emoji": "📊",
+        "pronouns": "he/him",
         "focus": "Finance, Margins, Valuation, Profitability",
         "bio": "A ruthless financial pragmatist. Cares only about cold hard cash, royalty structures, and proven unit economics. Despises high valuations without sales.",
     },
     "marcus": {
         "name": "Marcus Sterling",
         "emoji": "🛡️",
+        "pronouns": "he/him",
         "focus": "Technology, Architecture, Defensibility, Scale",
         "bio": "A tech billionaire who looks for proprietary technology, strong IP, and founders who are willing to grind. Despises vague tech claims.",
     },
     "beatrice": {
         "name": "Beatrice Belmont",
         "emoji": "📈",
+        "pronouns": "she/her",
         "focus": "Branding, Leadership, Marketing, Trust",
         "bio": "A real estate mogul who invests in people rather than just numbers. Values raw passion, authenticity, and resilience. Skeptical of weak founders.",
     },
     "leona": {
         "name": "Leona Lyonne",
         "emoji": "👥",
+        "pronouns": "she/her",
         "focus": "Go-To-Market, Operations, Mass Appeal, Growth",
         "bio": "A consumer goods expert looking for clear utility, retail readiness, and operational efficiency. Ruthless about unit economics and distribution.",
     },
@@ -49,9 +53,23 @@ INVESTOR_IDS = ["vincent", "marcus", "beatrice", "leona"]
 
 def _investor_instruction(inv_id: str) -> str:
     p = INVESTOR_PERSONAS[inv_id]
+
+    # Build roster so every agent knows the correct name and pronouns for all peers
+    roster_lines = "\n".join(
+        f"  - {q['name']} ({q['pronouns']})"
+        for qid, q in INVESTOR_PERSONAS.items()
+    )
+
     return f"""You are {p['name']} {p['emoji']}, a Shark Tank VC investor.
 Focus: {p['focus']}
 Bio: {p['bio']}
+
+INVESTOR ROSTER (memorise names and pronouns):
+{roster_lines}
+
+NAMING RULE (absolute): When referring to another investor, always use their full name.
+Never use "he", "she", "they", or any pronoun in place of a name. Say "Beatrice" not "she",
+"Vincent" not "he". This applies to questions, banter, offers, and all other output.
 
 You will receive specific tasks from the simulation orchestrator:
 - GENERATE QUESTION: Produce one sharp, challenging question targeting your focus area. Max 40 words. No meta-text.
