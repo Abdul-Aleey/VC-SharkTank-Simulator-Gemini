@@ -88,16 +88,17 @@ class SimulationOrchestrator:
         # Per-investor simulation state (not in ADK session — kept here for clarity)
         self.investor_states: dict = {
             inv_id: {
-                "confidence":    50,
-                "status":        "ACTIVE",
-                "questionsAsked": 0,
-                "strengths":     [],
-                "weaknesses":    [],
-                "risks":         [],
-                "trend":         0,
-                "thoughtBubble": "",
-                "agentState":    "IDLE",
-                "isThinking":    False,
+                "confidence":      50,
+                "status":          "ACTIVE",
+                "questionsAsked":  0,
+                "questionsHistory": [],   # every question this investor has asked
+                "strengths":       [],
+                "weaknesses":      [],
+                "risks":           [],
+                "trend":           0,
+                "thoughtBubble":   "",
+                "agentState":      "IDLE",
+                "isThinking":      False,
             }
             for inv_id in INVESTOR_IDS
         }
@@ -314,14 +315,25 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         self.investor_states[inv_id]["agentState"] = "ASKING"
         await self._emit_investor_update(inv_id)
 
-        history_str = self._history_str(last=10)
+        history_str   = self._history_str(last=10)
         founder_first = self.config.get('founderName', 'Founder').split()[0]
+
+        prev_qs = self.investor_states[inv_id]["questionsHistory"]
+        if prev_qs:
+            avoid_block = (
+                "\nTopics you have ALREADY asked about (do not repeat or rephrase these):\n"
+                + "\n".join(f"  - {q}" for q in prev_qs)
+                + "\nAsk about a completely different angle.\n"
+            )
+        else:
+            avoid_block = ""
+
         prompt = f"""GENERATE QUESTION
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Ask: {self.config.get('askAmount')} for {self.config.get('askEquity')}%
 Description: {self.config.get('description')}
 Founder's first name: {founder_first}
-
+{avoid_block}
 Recent conversation:
 {history_str}
 
@@ -330,9 +342,14 @@ NAMING RULE: Address the founder as "{founder_first}", never as "he", "she", "si
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
         text = await self._run_investor_agent(inv_id, prompt)
+        question = text.strip()
+
+        # Record so future rounds avoid repeating this topic
+        self.investor_states[inv_id]["questionsHistory"].append(question)
+
         self.investor_states[inv_id]["agentState"] = "IDLE"
         await self._emit_investor_update(inv_id)
-        return text.strip()
+        return question
 
     # ─── Founder response ─────────────────────────────────────────────────────
 
