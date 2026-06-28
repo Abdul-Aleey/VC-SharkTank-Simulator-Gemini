@@ -148,12 +148,20 @@ class SimulationOrchestrator:
                 break
             random.shuffle(active)
 
-            for inv_id in active:
+            # Pre-generated questions: keyed by investor id, filled at end of each
+            # exchange so the next investor's question is ready the moment they're called.
+            prefetched_questions: dict[str, str] = {}
+
+            for idx, inv_id in enumerate(active):
                 if self.investor_states[inv_id]["status"] != "ACTIVE":
                     continue
 
-                # Investor asks a question
-                question = await self._generate_question(inv_id)
+                # Use prefetched question if available, otherwise generate now
+                if inv_id in prefetched_questions:
+                    question = prefetched_questions.pop(inv_id)
+                else:
+                    question = await self._generate_question(inv_id)
+
                 self._add_to_history(inv_id, question)
                 await self._emit("question", {
                     "sender":          inv_id,
@@ -180,9 +188,24 @@ class SimulationOrchestrator:
                 # not while it is still playing. Frontend sends {action:"speech_done"}.
                 await self._wait_for_speech_done()
 
-                # All active investors evaluate in parallel.
-                # Pass round_num so every agent sees the same round context.
-                await self._parallel_evaluate(response, round_num)
+                # Find the next still-active investor in this round so we can
+                # prefetch their question while evaluation runs (saves ~3 s per exchange).
+                next_asker = next(
+                    (a for a in active[idx + 1:] if self.investor_states[a]["status"] == "ACTIVE"),
+                    None,
+                )
+
+                if next_asker:
+                    # Evaluate + prefetch next question in parallel — they are independent:
+                    # evaluation updates confidence state; question generation only reads
+                    # chat history which is already finalised for this exchange.
+                    _, prefetched_q = await asyncio.gather(
+                        self._parallel_evaluate(response, round_num),
+                        self._generate_question(next_asker),
+                    )
+                    prefetched_questions[next_asker] = prefetched_q
+                else:
+                    await self._parallel_evaluate(response, round_num)
 
                 # Banter (25 % chance, only references speakers already in history)
                 await self._maybe_banter()
