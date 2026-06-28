@@ -188,27 +188,24 @@ class SimulationOrchestrator:
                 # not while it is still playing. Frontend sends {action:"speech_done"}.
                 await self._wait_for_speech_done()
 
-                # Find the next still-active investor in this round so we can
-                # prefetch their question while evaluation runs (saves ~3 s per exchange).
+                # Evaluate all active investors
+                await self._parallel_evaluate(response, round_num)
+
+                # Find the next still-active investor in this round AFTER evaluation
+                # (so we know accurate exit status before picking next_asker).
                 next_asker = next(
                     (a for a in active[idx + 1:] if self.investor_states[a]["status"] == "ACTIVE"),
                     None,
                 )
 
-                if next_asker:
-                    # Evaluate + prefetch next question in parallel — they are independent:
-                    # evaluation updates confidence state; question generation only reads
-                    # chat history which is already finalised for this exchange.
-                    _, prefetched_q = await asyncio.gather(
-                        self._parallel_evaluate(response, round_num),
-                        self._generate_question(next_asker),
-                    )
-                    prefetched_questions[next_asker] = prefetched_q
-                else:
-                    await self._parallel_evaluate(response, round_num)
-
-                # Banter (25 % chance, only references speakers already in history)
+                # Banter then prefetch — sequential to avoid concurrent ADK session access.
+                # Banter picks a random active investor (could be next_asker); running
+                # _generate_question(next_asker) at the same time would hit the same
+                # InMemorySession and corrupt the result.
                 await self._maybe_banter()
+
+                if next_asker:
+                    prefetched_questions[next_asker] = await self._generate_question(next_asker)
 
                 self.investor_states[inv_id]["questionsAsked"] += 1
 
