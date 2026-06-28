@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-950 text-slate-100">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VC Shark Tank Multi-Agent Simulator</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          animation: {
+            'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            'laser': 'laser 2s linear infinite',
+          },
+          keyframes: {
+            laser: {
+              '0%': { transform: 'translateY(-100%)' },
+              '100%': { transform: 'translateY(100%)' },
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <!-- Custom Glassmorphic, Laser Scan, and Print Styles -->
+  <style>
+    @keyframes laser-scan {
+      0% { top: -10%; opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { top: 110%; opacity: 0; }
+    }
+    .laser-scan-line {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: linear-gradient(90deg, transparent, rgba(99, 102, 241, 0.8), transparent);
+      box-shadow: 0 0 15px rgba(99, 102, 241, 0.8);
+      animation: laser-scan 3s linear infinite;
+      pointer-events: none;
+    }
+    /* Custom Scrollbar for Glassmorphism */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: rgba(255, 255, 255, 0.02);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    /* Bulletproof Print Stylesheet */
+    @media print {
+      body {
+        background: white !important;
+        color: black !important;
+      }
+      header, footer, .print\:hidden, button, select, input, textarea {
+        display: none !important;
+      }
+      #print-report-area {
+        display: block !important;
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        background: white !important;
+        color: black !important;
+        padding: 20px !important;
+      }
+      #print-report-area * {
+        color: black !important;
+        border-color: #cbd5e1 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        text-shadow: none !important;
+        backdrop-filter: none !important;
+      }
+    }
+  </style>
+  <!-- Import Map -->
+  </head>
+<body class="h-full overflow-x-hidden">
+  <div id="root" class="h-full"></div>
+<script type="module" src="/index.js"></script></body>
+</html>

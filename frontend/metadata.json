@@ -1,0 +1,7 @@
+{
+  "name": "VC Shark Tank Multi-Agent Simulator",
+  "description": "A state-of-the-art multi-agent venture capital pitch simulator featuring parallel AI investor agents, an AI founder agent, distinct voice synthesis, and interactive bargaining.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

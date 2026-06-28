@@ -1,0 +1,197 @@
+"""
+VC Shark Tank Simulator — Google ADK Multi-Agent Backend
+=========================================================
+Replaces the old Vertex AI proxy with a real multi-agent simulation server.
+
+Each simulation run creates 5 independent ADK agents:
+  - FounderAgent       (AI pitch + responses)
+  - VincentAgent       (finance focus)
+  - MarcusAgent        (tech focus)
+  - BeatriceAgent      (branding focus)
+  - LeonaAgent         (go-to-market focus)
+
+The SimulationOrchestrator coordinates them and streams typed JSON events
+to the frontend over a WebSocket connection.
+
+Usage:
+  pip install -r requirements.txt
+  uvicorn server:app --host 127.0.0.1 --port 5000
+"""
+
+import asyncio
+import json
+import os
+
+import uvicorn
+from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+
+from simulation.orchestrator import SimulationOrchestrator
+
+load_dotenv(".env.local")
+
+API_BACKEND_PORT = int(os.getenv("API_BACKEND_PORT", "5000"))
+API_BACKEND_HOST = os.getenv("API_BACKEND_HOST", "127.0.0.1")
+
+# Vertex AI mode: set GOOGLE_GENAI_USE_VERTEXAI=true in env (Cloud Run service account
+# handles auth automatically — no user API key needed).
+VERTEX_AI_MODE = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("true", "1", "yes")
+
+app = FastAPI(title="VC Shark Tank — ADK Multi-Agent Server")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+async def health():
+    engine = "Google ADK + Vertex AI" if VERTEX_AI_MODE else "Google ADK"
+    return {"status": "ok", "engine": engine}
+
+
+@app.get("/config")
+async def get_config():
+    """Frontend calls this on load to know whether to show the API key modal."""
+    return {
+        "requiresApiKey": not VERTEX_AI_MODE,
+        "vertexAI": VERTEX_AI_MODE,
+    }
+
+
+@app.websocket("/ws-simulate")
+async def ws_simulate(websocket: WebSocket):
+    """
+    Main simulation WebSocket.
+
+    Protocol (frontend → backend):
+      {"action": "start",             "config": {...}, "apiKey": "AIza..."}
+      {"action": "founder_response",  "text": "..."}        # REAL mode only
+      {"action": "accept_offer",      "offerId": "..."}
+      {"action": "counter_offer",     "text": "..."}
+      {"action": "walk_away"}
+
+    Protocol (backend → frontend):
+      {"type": "pitch",             "sender", "senderName", "text"}
+      {"type": "question",          "sender", "senderName", "text", "waitForResponse"}
+      {"type": "founder_response",  "sender", "senderName", "text"}
+      {"type": "banter",            "sender", "senderName", "text"}
+      {"type": "exit_speech",       "sender", "senderName", "text"}
+      {"type": "investor_update",   "investorId", "confidence", "trend", "status",
+                                    "thoughtBubble", "strengths", "weaknesses",
+                                    "risks", "agentState", "isThinking"}
+      {"type": "founder_agent_state", "state"}
+      {"type": "system_message",    "text"}
+      {"type": "offer_speech",      "sender", "senderName", "text", "offer"}
+      {"type": "bargaining_start",  "offers": [...]}
+      {"type": "report",            "data": {...}}
+      {"type": "agent_log",         "agentName", "message", "logType"}
+      {"type": "error",             "message"}
+    """
+    await websocket.accept()
+
+    # ── Wait for the initial "start" message ──────────────────────────────────
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+        msg = json.loads(raw)
+    except (asyncio.TimeoutError, json.JSONDecodeError) as exc:
+        await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+        await websocket.close()
+        return
+
+    if msg.get("action") != "start":
+        await websocket.send_text(json.dumps({"type": "error", "message": "Expected action=start"}))
+        await websocket.close()
+        return
+
+    config  = msg.get("config", {})
+    api_key = msg.get("apiKey", "")
+
+    if not VERTEX_AI_MODE and not api_key:
+        await websocket.send_text(json.dumps({"type": "error", "message": "No API key provided."}))
+        await websocket.close()
+        return
+
+    # ── Create orchestrator ───────────────────────────────────────────────────
+    orchestrator = SimulationOrchestrator(config=config, api_key=api_key)
+
+    # ── Three concurrent tasks ────────────────────────────────────────────────
+    # 1. run_sim    — drives the ADK agents, pushes events into orchestrator._q
+    # 2. send_events — drains _q and sends JSON to the browser
+    # 3. recv_msgs  — reads incoming browser messages (responses, offers, etc.)
+
+    async def run_sim():
+        try:
+            await orchestrator.run()
+        except Exception as exc:
+            await orchestrator.event_queue.put({"type": "error", "message": str(exc)})
+        finally:
+            # Sentinel so send_events knows to stop
+            await orchestrator.event_queue.put({"type": "__done__"})
+
+    async def send_events():
+        while True:
+            event = await orchestrator.event_queue.get()
+            if event.get("type") == "__done__":
+                break
+            try:
+                await websocket.send_text(json.dumps(event))
+            except Exception:
+                break
+
+    async def recv_msgs():
+        try:
+            async for raw_msg in websocket.iter_text():
+                try:
+                    incoming = json.loads(raw_msg)
+                except json.JSONDecodeError:
+                    continue
+
+                action = incoming.get("action")
+                if action == "founder_response":
+                    await orchestrator.receive_founder_response(incoming.get("text", ""))
+                elif action in ("accept_offer", "counter_offer", "walk_away"):
+                    action_payload = {"type": action.replace("_offer", "").replace("walk_away", "walk_away")}
+                    if action == "accept_offer":
+                        action_payload["type"]    = "accept"
+                        action_payload["offerId"] = incoming.get("offerId", "")
+                    elif action == "counter_offer":
+                        action_payload["type"] = "counter"
+                        action_payload["text"] = incoming.get("text", "")
+                    else:
+                        action_payload["type"] = "walk_away"
+                    await orchestrator.receive_bargain_action(action_payload)
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+
+    try:
+        await asyncio.gather(run_sim(), send_events(), recv_msgs())
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    print(f"[ADK Server] Starting on http://{API_BACKEND_HOST}:{API_BACKEND_PORT}")
+    uvicorn.run(
+        "server:app",
+        host=API_BACKEND_HOST,
+        port=API_BACKEND_PORT,
+        reload=False,
+        log_level="info",
+    )

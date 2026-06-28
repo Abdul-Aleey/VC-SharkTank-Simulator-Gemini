@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.env.local
+.env
+*.egg-info/
+dist/
+.venv/
+venv/
+test_ws.py
