@@ -119,31 +119,37 @@ def build_founder_agent(model: str = "gemini-2.5-flash") -> Agent:
     )
 
 
-def build_session_service() -> InMemorySessionService:
-    return InMemorySessionService()
-
-
 def build_runners(
     investor_agents: dict,
     founder_agent: Agent,
-    session_service: InMemorySessionService,
     app_name: str = "shark_tank",
-) -> tuple[dict, Runner]:
+) -> tuple[dict, Runner, dict, InMemorySessionService]:
     """
     Build one Runner per investor + one Runner for the founder.
-    Returns (investor_runners_dict, founder_runner).
+    Each runner gets its OWN InMemorySessionService so that the 4 investor
+    runners running concurrently via asyncio.gather never touch shared service
+    state — the root cause of the intermittent 'root node agent canceled' crash
+    that appeared at exchange 7+ when session read-modify-write operations
+    interleaved across runners in the same service instance.
+
+    Returns (investor_runners_dict, founder_runner,
+             investor_session_svcs_dict, founder_session_svc).
     """
+    investor_session_svcs = {
+        inv_id: InMemorySessionService() for inv_id in investor_agents
+    }
     investor_runners = {
         inv_id: Runner(
             agent=agent,
             app_name=app_name,
-            session_service=session_service,
+            session_service=investor_session_svcs[inv_id],
         )
         for inv_id, agent in investor_agents.items()
     }
+    founder_session_svc = InMemorySessionService()
     founder_runner = Runner(
         agent=founder_agent,
         app_name=app_name,
-        session_service=session_service,
+        session_service=founder_session_svc,
     )
-    return investor_runners, founder_runner
+    return investor_runners, founder_runner, investor_session_svcs, founder_session_svc

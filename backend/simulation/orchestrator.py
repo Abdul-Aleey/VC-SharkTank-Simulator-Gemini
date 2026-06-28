@@ -36,7 +36,6 @@ from .agents import (
     build_founder_agent,
     build_investor_agents,
     build_runners,
-    build_session_service,
 )
 
 APP_NAME = "shark_tank"
@@ -77,13 +76,19 @@ class SimulationOrchestrator:
         else:
             raise ValueError("No auth: set GOOGLE_GENAI_USE_VERTEXAI=true or provide an API key")
 
-        # Build ADK agents & runners (each investor gets its own session)
-        self._session_svc      = build_session_service()
+        # Build ADK agents & runners.
+        # Each runner gets its own InMemorySessionService — no shared state between
+        # the 4 investor runners that execute concurrently via asyncio.gather.
+        # A shared service caused intermittent session corruption at exchange 7+
+        # (read-modify-write operations interleaved at asyncio yield points).
         self._investor_agents  = build_investor_agents(self.model)
         self._founder_agent    = build_founder_agent(self.model)
-        self._investor_runners, self._founder_runner = build_runners(
-            self._investor_agents, self._founder_agent, self._session_svc, APP_NAME
-        )
+        (
+            self._investor_runners,
+            self._founder_runner,
+            self._investor_session_svcs,
+            self._founder_session_svc,
+        ) = build_runners(self._investor_agents, self._founder_agent, APP_NAME)
 
         # Per-investor simulation state (not in ADK session — kept here for clarity)
         self.investor_states: dict = {
@@ -194,31 +199,52 @@ class SimulationOrchestrator:
                     "text":       response,
                 })
 
-                # Wait for the frontend to confirm TTS playback is complete.
-                # This ensures all investor agents evaluate AFTER the answer is spoken,
-                # not while it is still playing. Frontend sends {action:"speech_done"}.
-                await self._wait_for_speech_done()
+                # Identify the next asker now (pre-evaluate) so we can overlap work.
+                # If they drop out during evaluation the early prefetch is discarded below.
+                next_asker_pre = next(
+                    (a for a in active[idx + 1:] if self.investor_states[a]["status"] == "ACTIVE"),
+                    None,
+                )
 
-                # Evaluate all active investors
+                # AI mode: generate next investor's question concurrently with TTS playback.
+                # Question gen (~3-5 s) finishes well inside the speech_done wait (~10-15 s),
+                # so the cost is fully hidden — nothing added to the hot path after TTS ends.
+                # REAL mode: speech_done fires immediately (no TTS window); skip early prefetch.
+                early_q: str | None = None
+                if self.mode == "ai" and next_asker_pre:
+                    results = await asyncio.gather(
+                        self._wait_for_speech_done(),
+                        self._generate_question(next_asker_pre),
+                        return_exceptions=True,
+                    )
+                    q_result = results[1]
+                    early_q = q_result if isinstance(q_result, str) else None
+                else:
+                    await self._wait_for_speech_done()
+
+                # Evaluate all active investors (after speech is done)
                 await self._parallel_evaluate(response, round_num)
 
-                # Find the next still-active investor in this round AFTER evaluation
-                # (so we know accurate exit status before picking next_asker).
+                # Post-evaluate: find actual next asker (status may have changed)
                 next_asker = next(
                     (a for a in active[idx + 1:] if self.investor_states[a]["status"] == "ACTIVE"),
                     None,
                 )
 
-                if next_asker:
-                    # Run banter and next-question generation in parallel.
-                    # _investor_locks guarantee that if banter happens to pick next_asker
-                    # as its speaker, the two ADK calls for that session are serialised
-                    # automatically — no corruption risk.
-                    _, prefetched_q = await asyncio.gather(
+                if early_q is not None and next_asker == next_asker_pre:
+                    # Early prefetch is valid — store it and just run banter
+                    prefetched_questions[next_asker] = early_q
+                    await self._maybe_banter()
+                elif next_asker:
+                    # No valid early prefetch — generate question + banter in parallel
+                    # (original approach; also handles REAL mode and rare drop-out cases)
+                    gathered = await asyncio.gather(
                         self._maybe_banter(),
                         self._generate_question(next_asker),
+                        return_exceptions=True,
                     )
-                    prefetched_questions[next_asker] = prefetched_q
+                    q_result = gathered[1]
+                    prefetched_questions[next_asker] = q_result if isinstance(q_result, str) else ""
                 else:
                     await self._maybe_banter()
 
@@ -258,13 +284,13 @@ class SimulationOrchestrator:
 
     async def _init_sessions(self):
         for inv_id in INVESTOR_IDS:
-            session = await self._session_svc.create_session(
+            session = await self._investor_session_svcs[inv_id].create_session(
                 app_name=APP_NAME,
                 user_id=f"{inv_id}_user",
             )
             self._investor_sessions[inv_id] = session
 
-        self._founder_session = await self._session_svc.create_session(
+        self._founder_session = await self._founder_session_svc.create_session(
             app_name=APP_NAME,
             user_id="founder_user",
         )
@@ -447,7 +473,8 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                 "warning",
             )
             exit_tasks = [self._generate_exit_speech(inv_id) for inv_id in exit_speeches]
-            exit_texts = await asyncio.gather(*exit_tasks)
+            exit_texts_raw = await asyncio.gather(*exit_tasks, return_exceptions=True)
+            exit_texts = [t if isinstance(t, str) else "" for t in exit_texts_raw]
 
             for inv_id, exit_txt in zip(exit_speeches, exit_texts):
                 name = INVESTOR_PERSONAS[inv_id]["name"]
@@ -465,12 +492,20 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         self, inv_id: str, founder_response: str, round_num: int = 1
     ) -> dict:
         """One investor agent evaluates — this runs in parallel with the other 3."""
-        state       = self.investor_states[inv_id]
-        history_str = self._history_str(last=10)
-
-        founder_first = self.config.get('founderName', 'Founder').split()[0]
-        prompt = f"""EVALUATE RESPONSE
-You are evaluating as {INVESTOR_PERSONAS[inv_id]['name']}.
+        state    = self.investor_states[inv_id]
+        name     = INVESTOR_PERSONAS[inv_id]["name"]
+        fallback = {
+            "confidence":    state["confidence"],
+            "thoughtBubble": "Processing...",
+            "strengths":     [],
+            "weaknesses":    [],
+            "risks":         [],
+        }
+        try:
+            history_str   = self._history_str(last=10)
+            founder_first = self.config.get('founderName', 'Founder').split()[0]
+            prompt = f"""EVALUATE RESPONSE
+You are evaluating as {name}.
 
 Founder ({founder_first}) said: "{founder_response}"
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
@@ -492,14 +527,11 @@ Return ONLY valid JSON, no markdown fences:
 }}
 Language for text fields: {'Japanese' if self.is_ja else 'English'}"""
 
-        raw = await self._run_investor_agent(inv_id, prompt)
-        return self._parse_json(raw, {
-            "confidence":    state["confidence"],
-            "thoughtBubble": "Processing...",
-            "strengths":     [],
-            "weaknesses":    [],
-            "risks":         [],
-        })
+            raw = await self._run_investor_agent(inv_id, prompt)
+            return self._parse_json(raw, fallback)
+        except Exception as exc:
+            await self._log(name, f"Evaluation skipped ({exc.__class__.__name__}) — holding current confidence.", "warning")
+            return fallback
 
     # ─── Banter (bug-fixed: only references speakers in chat_history) ─────────
 
@@ -1132,14 +1164,17 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         async with self._investor_locks[inv_id]:
             runner  = self._investor_runners[inv_id]
             session = self._investor_sessions[inv_id]
+            name    = INVESTOR_PERSONAS[inv_id]["name"]
             try:
                 return await asyncio.wait_for(
                     self._run_agent(runner, f"{inv_id}_user", session.id, prompt),
                     timeout=45.0,
                 )
             except asyncio.TimeoutError:
-                name = INVESTOR_PERSONAS[inv_id]["name"]
                 await self._log(name, "ADK call timed out (45 s) — skipping turn.", "warning")
+                return ""
+            except Exception as exc:
+                await self._log(name, f"ADK call failed ({exc.__class__.__name__}) — skipping turn.", "warning")
                 return ""
 
     async def _run_founder_agent(self, prompt: str) -> str:
@@ -1155,6 +1190,9 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             )
         except asyncio.TimeoutError:
             await self._log("Founder Agent", "ADK call timed out (45 s) — skipping turn.", "warning")
+            return ""
+        except Exception as exc:
+            await self._log("Founder Agent", f"ADK call failed ({exc.__class__.__name__}) — skipping turn.", "warning")
             return ""
 
     @staticmethod
