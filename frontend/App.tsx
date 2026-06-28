@@ -405,9 +405,14 @@ export default function App() {
           // Revision or withdrawal during negotiation loop — replace cards immediately
           // so the panel shows the updated/remaining offers straight away.
           setActiveOffers(event.offers);
+          setIsProcessing(false);
+        } else {
+          // Initial offer panel: queue setIsProcessing behind the speech queue so the
+          // bargaining buttons only unlock after all Q&A and offer speeches have played out.
+          speechQueueRef.current = speechQueueRef.current.then(() => {
+            setIsProcessing(false);
+          });
         }
-        // Initial bargaining_start: cards already revealed one-by-one via offer_speech onAfter.
-        setIsProcessing(false);
         break;
       }
 

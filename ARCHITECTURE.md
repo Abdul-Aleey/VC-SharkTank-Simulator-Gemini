@@ -130,6 +130,16 @@ exit_texts = await asyncio.gather(*exit_tasks)
 ```
 When multiple investors hit the confidence threshold simultaneously, their exit speeches are generated in parallel, then emitted to the frontend sequentially.
 
+**4. Parallel Offer Term Generation (bargaining phase)**
+```python
+results = await asyncio.gather(
+    *[self._generate_single_offer_terms(inv_id, conf, ask_amount, ask_equity)
+      for inv_id in solo_investors],
+    return_exceptions=True,
+)
+```
+All individual investor offer terms are generated in parallel. `return_exceptions=True` means one investor's ADK failure doesn't cancel the others — each failure falls back to the founder's original ask equity. Offer *speeches* are generated and emitted sequentially after this (one at a time, so they arrive in order).
+
 **Sequential operations (intentional):**
 - Questions: each investor asks one at a time (structured turn-taking)
 - Founder responses: one at a time (single speaker)
@@ -237,6 +247,23 @@ The backend tracks `_sim_phase` (`ONGOING` → `BARGAINING` → `DONE`) and emit
 
 The frontend stores the phase in `simPhaseRef` and ignores any `report` event that arrives before `DONE`, preventing a premature end-of-simulation screen.
 
+### Founder Personality System
+
+The user selects one of six personality levels in the Setup screen. The selection is stored in `config.personality` and sent to the backend in the WebSocket `start` message.
+
+The backend defines `PERSONALITY_GUIDE` — a dict mapping each level to a full behavioral description. This description is injected directly into every founder prompt (pitch, Q&A response, bargaining) so Gemini receives explicit behavioral instructions rather than just a label:
+
+| Level | Behavioral description injected |
+|-------|--------------------------------|
+| `excellent` | Flawless, high-energy, exact metrics — CAC, LTV, MRR, margins, runway. Handles pressure confidently, pre-empts follow-ups. |
+| `good` | Strong and strategic. Solid metrics, clear reasoning. Minor gaps only under very deep probing. |
+| `average` | Covers basics without standout data. Handles easy questions, gets vague under expert pressure. |
+| `weak` | Fumbles specifics, gives ranges instead of exact figures. Gets flustered by follow-ups. |
+| `poor` | Defensive, avoids direct answers, contradicts earlier claims, sounds unprepared. |
+| `very_poor` | Panics, forgets numbers already stated, uses wrong terminology, rambles without landing a point. |
+
+The same description is used in the pitch, Q&A response, and AI-mode bargaining prompts — so personality is consistent across the entire simulation.
+
 ### Question Deduplication
 
 Each investor tracks all questions it has previously asked in `investor_states[inv_id]["questionsHistory"]`. The full list is injected into every subsequent `GENERATE QUESTION` prompt with an explicit instruction to ask about a completely different angle. This prevents repetitive questioning in long simulations (8–10 rounds).
@@ -314,6 +341,17 @@ Both steps use `asyncio.gather()`. The results are merged into a single `report`
 
 The `readinessScore` is clamped to 1–10 with a guard for agents that return values like `75` (out-of-range) — it's divided by 10 and rounded if above 10.
 
+**Per-shark verdict in `ReportScreen`** distinguishes actual investment from offers that weren't taken:
+
+| Investor status | In `agreedTermSheet.investors`? | Label shown |
+|-----------------|--------------------------------|-------------|
+| `OUT` | — | Out |
+| `INVEST` | Yes | Deal Closed |
+| `INVEST` | No | Offer Made — Not Accepted |
+| `ACTIVE` | — | Interested |
+
+This matters because all qualifying investors get `status = INVEST` once the offer round begins, regardless of whether the founder ultimately chose their deal.
+
 ---
 
 ## Frontend Internals
@@ -359,6 +397,8 @@ This is the most important frontend design decision. Naively calling `window.spe
 **Investor confidence updates** are also routed through the queue. When evaluation results arrive, confidence meters only update after the associated dialogue has been spoken — so the user hears the question and answer before seeing the meter change. The exception is the "thinking" state (isThinking=true): thinking spinners appear immediately when evaluation starts, so the user can see investors are evaluating while the dialogue speech plays.
 
 **Offer cards** appear one-by-one in sync with each shark's spoken offer. Each `offer_speech` event is queued with an `onAfter` callback — when that shark's TTS finishes, their offer card is added to `activeOffers`. This creates the live "card-reveal as speech ends" effect rather than all cards appearing at once.
+
+**Bargaining panel unlock** — the initial `bargaining_start` (`isRevision: false`) does NOT immediately set `isProcessing = false`. It chains `setIsProcessing(false)` onto the tail of `speechQueueRef.current` so the Accept/Counter/Walk Away buttons only become active after all Q&A and offer speeches have finished playing. Revision `bargaining_start` events (`isRevision: true`) update `activeOffers` and unlock immediately since no speeches are pending at that point.
 
 **Final report** is also queued behind all TTS — when the backend sends `report`, the frontend chains `setStep('REPORT')` onto the tail of `speechQueueRef.current`. The report screen only appears after the founder's acceptance speech and all offer speeches have fully played out.
 

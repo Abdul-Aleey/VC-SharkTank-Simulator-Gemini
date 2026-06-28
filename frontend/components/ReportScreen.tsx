@@ -128,7 +128,13 @@ export default function ReportScreen({ report, config, investors, onRestart, onD
                   </p>
                   <p className="text-slate-300 print:text-slate-800">
                     <strong className="text-indigo-400 print:text-indigo-700">Verdict:</strong>{' '}
-                    {inv.status === InvestorStatus.OUT ? 'Out' : inv.status === InvestorStatus.INVEST ? 'Invested' : 'Interested'}
+                    {inv.status === InvestorStatus.OUT
+                      ? 'Out'
+                      : inv.status === InvestorStatus.INVEST
+                        ? report.agreedTermSheet?.investors?.includes(inv.id)
+                          ? 'Deal Closed'
+                          : 'Offer Made — Not Accepted'
+                        : 'Interested'}
                   </p>
                 </div>
               </div>

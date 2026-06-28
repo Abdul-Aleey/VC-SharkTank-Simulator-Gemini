@@ -40,9 +40,42 @@ from .agents import (
 
 APP_NAME = "shark_tank"
 
-# Confidence thresholds (mirror the frontend constants)
-CONFIDENCE_OUT    = 25
-CONFIDENCE_INVEST = 85
+# Confidence threshold below which an investor drops out
+CONFIDENCE_OUT = 25
+
+# Founder personality — pitch style and Q&A behaviour injected into every prompt
+PERSONALITY_GUIDE = {
+    "excellent": (
+        "You are a flawless, elite-level founder. "
+        "Your pitch is high-energy and packed with precise metrics — exact gross margin %, CAC, LTV, MRR, runway, TAM. "
+        "Under questioning you give specific numbers instantly, handle pressure with confidence, and pre-empt follow-ups."
+    ),
+    "good": (
+        "You are a strong, strategic founder. "
+        "Your pitch is well-structured with solid business metrics and a clear narrative. "
+        "You know your numbers and give clear reasoning, with only minor gaps under very deep probing."
+    ),
+    "average": (
+        "You are an average founder — prepared but unremarkable. "
+        "Your pitch covers the basics without standout data or a compelling hook. "
+        "You answer easy questions adequately but get vague when experts press on specifics."
+    ),
+    "weak": (
+        "You are a weak founder who struggles under pressure. "
+        "Your pitch is vague — you mention numbers but fumble the specifics. "
+        "When questioned you give ranges instead of exact figures ('around 40%'), get flustered by expert follow-ups, and stumble when pressed."
+    ),
+    "poor": (
+        "You are a poorly prepared founder. "
+        "Your pitch wanders, misses core metrics, and sounds unconfident. "
+        "Under questioning you get defensive, dodge direct answers, pivot to unrelated points, and sometimes contradict what you said earlier."
+    ),
+    "very_poor": (
+        "You are a completely unprepared, panicking founder. "
+        "Your pitch is incoherent — you forget key financial basics, give contradictory numbers, and fail to articulate a clear ask. "
+        "Under questioning you panic visibly, forget figures you already mentioned, use wrong terminology, and ramble without landing a point."
+    ),
+}
 
 
 class SimulationOrchestrator:
@@ -325,13 +358,15 @@ class SimulationOrchestrator:
 
         if self.mode == "ai":
             await self._log("Founder Agent", "Generating opening pitch via Google ADK...", "info")
+            personality_key = self.config.get('personality', 'excellent')
+            personality_desc = PERSONALITY_GUIDE.get(personality_key, PERSONALITY_GUIDE["excellent"])
             pitch = await self._run_founder_agent(
                 f"""GENERATE PITCH
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Founder: {self.config.get('founderName')}
 Description: {self.config.get('description')}
 Ask: {self.config.get('askAmount')} for {self.config.get('askEquity')}% equity
-Personality: {self.config.get('personality', 'excellent')}
+Founder personality: {personality_desc}
 Language: {'Japanese' if self.is_ja else 'English'}"""
             )
         else:
@@ -425,9 +460,11 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         await self._set_founder_agent_state("PITCHING")
 
         history_str = self._history_str(last=8)
+        personality_key  = self.config.get('personality', 'excellent')
+        personality_desc = PERSONALITY_GUIDE.get(personality_key, PERSONALITY_GUIDE["excellent"])
         prompt = f"""GENERATE RESPONSE
 You are: {self.config.get('founderName')}, founder of {self.config.get('startupName')}
-Personality: {self.config.get('personality', 'excellent')}
+Founder personality: {personality_desc}
 Question from {INVESTOR_PERSONAS[questioner_id]['name']}: "{question}"
 
 Conversation so far:
@@ -642,7 +679,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
     async def _phase_bargaining(self):
         qualifying = [
             i for i in INVESTOR_IDS
-            if self.investor_states[i]["confidence"] >= 26
+            if self.investor_states[i]["confidence"] > CONFIDENCE_OUT
             and self.investor_states[i]["status"] != "OUT"
         ]
 
@@ -685,7 +722,8 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                 "text": offer_speech, "offer": offer,
             })
 
-        # Show offer panel after all speeches are spoken
+        # Emit panel marker. Cards are revealed one-by-one on the frontend via
+        # onAfter callbacks — this signal just tells the frontend offer phase has started.
         await self._emit("bargaining_start", {"offers": list(active_offers.values()), "isRevision": False})
 
         # ── Negotiation loop ────────────────────────────────────────────────
@@ -925,10 +963,12 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             f"{o['cash']} for {o['equity']}% equity. Terms: {o.get('terms', 'none')}"
             for inv_id, o in active_offers.items()
         )
+        personality_key  = cfg.get('personality', 'excellent')
+        personality_desc = PERSONALITY_GUIDE.get(personality_key, PERSONALITY_GUIDE["excellent"])
         prompt = f"""NEGOTIATE as founder
 You are {cfg.get('founderName')}, founder of {cfg.get('startupName')}.
 Original ask: {cfg.get('askAmount')} for {cfg.get('askEquity')}% equity.
-Your personality: {cfg.get('personality', 'excellent')}
+Founder personality: {personality_desc}
 
 Offers currently on the table:
 {offers_summary}
@@ -1077,7 +1117,7 @@ interest rate, milestone conditions, board seat — whatever fits your style.
 Return ONLY valid JSON, no markdown fences:
 {{
   "equity": <integer — your equity % demand>,
-  "terms": "<full deal conditions in one sentence. Use specific numbers — royalty %, recoupment expressed as a multiple of the investment, interest rate %, any milestones. Never write a dollar amount for recoupment; always state the multiple>"
+  "terms": "<full deal conditions in one sentence. If you use a royalty structure, write it as 'X% royalty on net sales until recouping N× my investment' — both the percentage AND the multiple must appear together. For any other structure: state interest rate % annually, milestone trigger, board seat, etc. Never omit the percentage when mentioning recoupment>"
 }}
 Language: {'Japanese' if self.is_ja else 'English'}"""
 

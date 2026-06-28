@@ -252,7 +252,7 @@ flowchart TD
     B --> C[_set_founder_agent_state PITCHING]
     C --> D{mode?}
 
-    D -->|AI| E[_run_founder_agent\nGENERATE PITCH prompt\nwith startup details\npersonality type\nlanguage]
+    D -->|AI| E[_run_founder_agent\nGENERATE PITCH prompt\nwith startup details\nfull personality behavioral\ndescription from PERSONALITY_GUIDE\nlanguage]
     E --> F[ADK FounderAgent\nrun_async]
     F --> G[Gemini generates\ncompelling pitch text]
     G --> H[pitch text returned]
@@ -347,11 +347,9 @@ flowchart TD
 
     K --> L{confidence\n≤ 25?}
     L -->|Yes| M[status = OUT\nagentState = OUT\nadd to exit_speeches list]
-    L -->|No| N{confidence\n≥ 85?}
-    N -->|Yes| O[status = INVEST\nagentState = INVESTED]
-    N -->|No| P[status = ACTIVE\nagentState = IDLE]
+    L -->|No| N[agentState = IDLE\nstatus stays ACTIVE\nINVEST set later in bargaining\nnot during rounds]
 
-    M & O & P --> Q[emit investor_update\nfor all investors]
+    M & N --> Q[emit investor_update\nfor all investors]
 
     Q --> R{exit_speeches\nnot empty?}
     R -->|Yes| S[asyncio.gather\n_generate_exit_speech × departing]
@@ -446,7 +444,7 @@ flowchart TD
     F -->|Yes — no one else\nhas spoken yet| Z
     F -->|No| G[referenceable = names\nof already_spoke investors]
 
-    G --> H[Build BANTER prompt\nwith speaker name\nreferenceable list\nlast 6 history messages\nCRITICAL: only mention\nreferenceable investors]
+    G --> H[Build BANTER prompt\nwith speaker name\nreferenceable list\nlast 6 history messages\nCRITICAL: only mention\nreferenceable investors\nNO question marks allowed\ncomment or reaction only]
     H --> I[ADK InvestorAgent\nrun_async for speaker]
     I --> J[Gemini generates\npunchy comment ≤25 words]
 
@@ -471,9 +469,9 @@ flowchart TD
     C -->|No| D[emit no-deal message\n_generate_report None]
 
     C -->|Yes| E[Set status=INVEST\nfor all qualifying\nemit investor_updates]
-    E --> F[_build_offers qualifying\nactive_offers dict keyed\nby lead investor id]
-    F --> G[Each shark speaks\ntheir offer one by one\nemit offer_speech per shark]
-    G --> H[emit bargaining_start\nall current offers\nqueued after speeches]
+    E --> F[_build_offers qualifying\nasyncio.gather: all solo investors\ngenerate own terms in parallel\nADK decides equity royalty\nrecoupment multiple interest rate\nno hardcoded values]
+    F --> G[Each shark speaks their offer\none at a time — ADK generates\npersonality-driven speech\nemit offer_speech per shark\nFrontend card appears via\nonAfter after each TTS ends]
+    G --> H[emit bargaining_start\nisRevision: false\nFrontend queues setIsProcessing false\nbehind speech queue — buttons unlock\nonly after all TTS drains]
 
     H --> I{mode?}
     I -->|AI| J[_ai_founder_decide_action\nFounderAgent evaluates ALL offers\nreturns action + speech]
@@ -492,11 +490,11 @@ flowchart TD
     O --> P[Shark speaks result\nemit banter own voice]
     P --> Q{result?}
     Q -->|accepted=true| M
-    Q -->|counter_offer not null| R[Shark counter-countered\nUpdate active_offers\nemit bargaining_start\nwith revised terms]
+    Q -->|counter_offer not null| R[Shark counter-countered\nUpdate active_offers\nemit bargaining_start\nisRevision: true\nFrontend replaces cards immediately]
     R --> I
     Q -->|hard reject| S[Remove shark's offer\nfrom active_offers]
     S --> T{any offers\nremaining?}
-    T -->|Yes| U[emit bargaining_start\nremaining offers only]
+    T -->|Yes| U[emit bargaining_start\nisRevision: true\nremaining offers only]
     U --> I
     T -->|No| V[emit negotiation\nbroke down\n_generate_report None]
 
@@ -528,7 +526,7 @@ flowchart TD
 
     F1 & F2 & F3 & F4 --> G[feedbacks_list collected\ndict: investorId → feedback]
 
-    G --> H[Vincent runs again\nas senior VC analyst\nGENERATE REPORT FEEDBACK\nreturns overall JSON]
+    G --> H[Vincent runs again\nas senior VC analyst\nGENERATE REPORT FEEDBACK\nprompt includes deal outcome:\ninvestor names cash equity%\nfull agreed terms string\nreturns overall JSON]
 
     H --> I[Parse report JSON\nreadinessScore verdict\nexecutiveSummary risks\nstrengths roadmap]
 
@@ -541,11 +539,12 @@ flowchart TD
     M --> N{deal provided?}
     N -->|Yes| O[report.agreedTermSheet = deal]
     N -->|No| P{Any investors\nwith status INVEST?}
-    P -->|Yes| Q[Auto term sheet:\nthose investors\nask amount\naskEquity + 5%]
+    P -->|Yes| Q[Safety fallback term sheet:\nthose investors\nask amount\noriginal askEquity\nno hardcoded additions]
     P -->|No| R[agreedTermSheet = null]
 
     O & Q & R --> S[emit report event\ndata: full report object]
-    S --> T[Frontend: setReport\nsetStep REPORT\nwsRef disconnect]
+    S --> T[Frontend: speechQueueRef.then\nsetReport setStep REPORT\nwsRef disconnect\nonly after all TTS drains]
+    T --> U[ReportScreen per-shark verdict\nINVEST + in agreedTermSheet = Deal Closed\nINVEST + not in agreedTermSheet = Offer Made Not Accepted\nOUT = Out\nACTIVE = Interested]
 ```
 
 ---
@@ -558,14 +557,16 @@ How text and audio stay in sync using a serialised Promise chain.
 flowchart TD
     A[WebSocket event arrives] --> B{Event type?}
 
-    B -->|pitch founder_response\nbanter exit_speech offer_speech| C[queueMessage\nmsg speakerId]
+    B -->|pitch founder_response\nbanter exit_speech| C[queueMessage\nmsg speakerId]
+    B -->|offer_speech| C2[queueMessage\nmsg speakerId\nonAfter: add offer card\nto activeOffers\ncard appears after TTS ends]
     B -->|question| D{waitForResponse\ntrue?}
     D -->|Yes — REAL mode| E[queueMessage\nmsg speakerId\nonAfter: setIsProcessing false]
     D -->|No — AI mode| C
     B -->|system_message| F[queueSystemMessage\ntext]
+    B -->|report| F2[speechQueueRef.current\n.then setReport\nsetStep REPORT\nonly after all TTS drains]
     B -->|investor_update\nfounder_agent_state\nagent_log etc| G[setInvestors / setState\nImmediate — no queue]
 
-    C & E --> H[Chain onto\nspeechQueueRef.current]
+    C & C2 & E --> H[Chain onto\nspeechQueueRef.current]
     F --> H
 
     H --> I[speechQueueRef.current\n= prev.then async =>\n  setChat add msg\n  await speakText\n  onAfter?]
