@@ -352,12 +352,10 @@ export default function App() {
       }
 
       case 'bargaining_start': {
-        // Queue so offer panel appears only after all offer speeches have been spoken
-        const offers = event.offers;
-        speechQueueRef.current = speechQueueRef.current.then(() => {
-          setActiveOffers(offers);
-          setIsProcessing(false);
-        });
+        // Show panel immediately — offer speeches continue playing in the background.
+        // Queuing behind TTS caused an apparent 45-60 s freeze after all rounds ended.
+        setActiveOffers(event.offers);
+        setIsProcessing(false);
         break;
       }
 

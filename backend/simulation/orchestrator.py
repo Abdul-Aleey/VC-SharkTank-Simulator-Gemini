@@ -186,44 +186,67 @@ class SimulationOrchestrator:
                     "waitForResponse": self.mode == "real",
                 })
 
-                # Founder responds
-                if self.mode == "ai":
-                    response = await self._generate_founder_response(question, inv_id)
-                else:
-                    response = await self._founder_response.get()
-
-                self._add_to_history("founder", response)
-                await self._emit("founder_response", {
-                    "sender":     "founder",
-                    "senderName": self.config.get("founderName", "Founder"),
-                    "text":       response,
-                })
-
-                # Identify the next asker now (pre-evaluate) so we can overlap work.
-                # If they drop out during evaluation the early prefetch is discarded below.
+                # Compute who asks next up-front so both modes can start prefetching early.
                 next_asker_pre = next(
                     (a for a in active[idx + 1:] if self.investor_states[a]["status"] == "ACTIVE"),
                     None,
                 )
-
-                # AI mode: generate next investor's question concurrently with TTS playback.
-                # Question gen (~3-5 s) finishes well inside the speech_done wait (~10-15 s),
-                # so the cost is fully hidden — nothing added to the hot path after TTS ends.
-                # REAL mode: speech_done fires immediately (no TTS window); skip early prefetch.
                 early_q: str | None = None
-                if self.mode == "ai" and next_asker_pre:
-                    results = await asyncio.gather(
-                        self._wait_for_speech_done(),
-                        self._generate_question(next_asker_pre),
-                        return_exceptions=True,
-                    )
-                    q_result = results[1]
-                    early_q = q_result if isinstance(q_result, str) else None
-                else:
-                    await self._wait_for_speech_done()
 
-                # Evaluate all active investors (after speech is done)
-                await self._parallel_evaluate(response, round_num)
+                # Founder responds — mode-specific path + question prefetch
+                if self.mode == "ai":
+                    response = await self._generate_founder_response(question, inv_id)
+
+                    self._add_to_history("founder", response)
+                    await self._emit("founder_response", {
+                        "sender":     "founder",
+                        "senderName": self.config.get("founderName", "Founder"),
+                        "text":       response,
+                    })
+
+                    # AI mode: run evaluate AND next question gen concurrently with TTS
+                    # (~10-15 s window).  Evaluate (~5-8 s) and question gen (~3-5 s) both
+                    # finish before TTS ends → gap after speech_done drops to ~0-5 s (banter
+                    # only), down from ~12-15 s (serial evaluate + question).
+                    if next_asker_pre:
+                        results = await asyncio.gather(
+                            self._wait_for_speech_done(),
+                            self._generate_question(next_asker_pre),
+                            self._parallel_evaluate(response, round_num),
+                            return_exceptions=True,
+                        )
+                        early_q = results[1] if isinstance(results[1], str) else None
+                    else:
+                        await asyncio.gather(
+                            self._wait_for_speech_done(),
+                            self._parallel_evaluate(response, round_num),
+                            return_exceptions=True,
+                        )
+
+                else:
+                    # REAL mode: generate next question while user reads and types (~30-60 s).
+                    # silent=True prevents the next investor flashing "ASKING" while the user
+                    # is still answering the current question.
+                    if next_asker_pre:
+                        real_results = await asyncio.gather(
+                            self._founder_response.get(),
+                            self._generate_question(next_asker_pre, silent=True),
+                            return_exceptions=True,
+                        )
+                        response = real_results[0] if isinstance(real_results[0], str) else ""
+                        early_q = real_results[1] if isinstance(real_results[1], str) else None
+                    else:
+                        response = await self._founder_response.get()
+
+                    self._add_to_history("founder", response)
+                    await self._emit("founder_response", {
+                        "sender":     "founder",
+                        "senderName": self.config.get("founderName", "Founder"),
+                        "text":       response,
+                    })
+                    # REAL mode: speech_done fires immediately; evaluate runs after.
+                    await self._wait_for_speech_done()
+                    await self._parallel_evaluate(response, round_num)
 
                 # Post-evaluate: find actual next asker (status may have changed)
                 next_asker = next(
@@ -298,11 +321,10 @@ class SimulationOrchestrator:
     # ─── Pitch phase ──────────────────────────────────────────────────────────
 
     async def _phase_pitch(self):
-        await self._log("Founder Agent", "Generating opening pitch via Google ADK...", "info")
-
         await self._set_founder_agent_state("PITCHING")
 
         if self.mode == "ai":
+            await self._log("Founder Agent", "Generating opening pitch via Google ADK...", "info")
             pitch = await self._run_founder_agent(
                 f"""GENERATE PITCH
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
@@ -313,21 +335,23 @@ Personality: {self.config.get('personality', 'excellent')}
 Language: {'Japanese' if self.is_ja else 'English'}"""
             )
         else:
-            cfg = self.config
-            if self.is_ja:
-                pitch = (f"こんにちは投資家の皆さん。私は{cfg.get('founderName')}です。"
-                         f"本日は{cfg.get('startupName')}のピッチを行います。"
-                         f"{cfg.get('description')}。"
-                         f"希望条件は{cfg.get('askAmount')}、株式{cfg.get('askEquity')}%です。")
-            else:
-                pitch = (f"Hello Sharks! I am {cfg.get('founderName')}, "
-                         f"founder of {cfg.get('startupName')}. "
-                         f"We are pitching {cfg.get('description')}. "
-                         f"We are seeking {cfg.get('askAmount')} for {cfg.get('askEquity')}% equity.")
+            # REAL mode: the human founder delivers their own pitch.
+            # Prompt them via a moderator question, then wait for their input.
+            await self._set_founder_agent_state("IDLE")
+            await self._emit("question", {
+                "sender":          "system",
+                "senderName":      "Moderator",
+                "text":            (
+                    "あなたの出番です！シャークたちにスタートアップのピッチを行ってください。"
+                    if self.is_ja else
+                    "The floor is yours — pitch your startup to the sharks!"
+                ),
+                "waitForResponse": True,
+            })
+            pitch = await self._founder_response.get()
 
         self._add_to_history("founder", pitch)
         await self._set_founder_agent_state("IDLE")
-
         await self._log("Founder Agent", "Pitch delivered to the panel.", "success")
         await self._emit("pitch", {
             "sender":     "founder",
@@ -337,12 +361,18 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
 
     # ─── Question generation ──────────────────────────────────────────────────
 
-    async def _generate_question(self, inv_id: str) -> str:
-        name = INVESTOR_PERSONAS[inv_id]["name"]
-        await self._log(f"{name} Agent", "Formulating strategic question via ADK...", "info")
+    async def _generate_question(self, inv_id: str, *, silent: bool = False) -> str:
+        """Generate an investor question via ADK.
 
-        self.investor_states[inv_id]["agentState"] = "ASKING"
-        await self._emit_investor_update(inv_id)
+        silent=True suppresses agentState UI updates — used when prefetching
+        a question in the background while the user is still typing their
+        current answer, so the next investor doesn't flash "ASKING" prematurely.
+        """
+        name = INVESTOR_PERSONAS[inv_id]["name"]
+        if not silent:
+            await self._log(f"{name} Agent", "Formulating strategic question via ADK...", "info")
+            self.investor_states[inv_id]["agentState"] = "ASKING"
+            await self._emit_investor_update(inv_id)
 
         history_str   = self._history_str(last=10)
         founder_first = self.config.get('founderName', 'Founder').split()[0]
@@ -357,17 +387,24 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         else:
             avoid_block = ""
 
+        focus = INVESTOR_PERSONAS[inv_id]["focus"]
         prompt = f"""GENERATE QUESTION
+You are the world's sharpest investor in: {focus}
+
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Ask: {self.config.get('askAmount')} for {self.config.get('askEquity')}%
 Description: {self.config.get('description')}
 Founder's first name: {founder_first}
 {avoid_block}
-Recent conversation:
+Conversation so far:
 {history_str}
 
-One sharp question targeting your focus area. Max 40 words. No meta-text.
-NAMING RULE: Address the founder as "{founder_first}", never as "he", "she", "sir", "ma'am", or any pronoun.
+Ask ONE expert-level question that:
+- Pinpoints a specific claim, number, or gap from what the founder said above
+- Uses your deep expertise in {focus} to expose something most investors would miss
+- Cannot be answered with vague platitudes
+- Is under 40 words, direct, conversational — no preamble or meta-text
+Address the founder as "{founder_first}".
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
         text = await self._run_investor_agent(inv_id, prompt)
@@ -376,8 +413,9 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         # Record so future rounds avoid repeating this topic
         self.investor_states[inv_id]["questionsHistory"].append(question)
 
-        self.investor_states[inv_id]["agentState"] = "IDLE"
-        await self._emit_investor_update(inv_id)
+        if not silent:
+            self.investor_states[inv_id]["agentState"] = "IDLE"
+            await self._emit_investor_update(inv_id)
         return question
 
     # ─── Founder response ─────────────────────────────────────────────────────
