@@ -180,8 +180,9 @@ class SimulationOrchestrator:
                 # not while it is still playing. Frontend sends {action:"speech_done"}.
                 await self._wait_for_speech_done()
 
-                # All active investors evaluate in parallel
-                await self._parallel_evaluate(response)
+                # All active investors evaluate in parallel.
+                # Pass round_num so every agent sees the same round context.
+                await self._parallel_evaluate(response, round_num)
 
                 # Banter (25 % chance, only references speakers already in history)
                 await self._maybe_banter()
@@ -323,11 +324,13 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
 
     # ─── Parallel evaluation (core multi-agent feature) ───────────────────────
 
-    async def _parallel_evaluate(self, founder_response: str):
+    async def _parallel_evaluate(self, founder_response: str, round_num: int = 1):
         """
         All active investor agents evaluate the founder's response simultaneously.
         This is the true multi-agent parallelism: 4 independent ADK agents,
         each with their own session, running concurrently via asyncio.gather().
+        round_num is the actual outer-loop round so every agent sees the same
+        round context regardless of how many questions they personally have asked.
         """
         active = [i for i in INVESTOR_IDS if self.investor_states[i]["status"] == "ACTIVE"]
 
@@ -345,7 +348,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         )
 
         # Run all evaluations concurrently — each is a separate ADK agent call
-        tasks   = [self._evaluate_single_investor(inv_id, founder_response) for inv_id in active]
+        tasks   = [self._evaluate_single_investor(inv_id, founder_response, round_num) for inv_id in active]
         results = await asyncio.gather(*tasks)
         result_map = dict(zip(active, results))
 
@@ -404,7 +407,9 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                     "text": f"{name} is OUT" if not self.is_ja else f"{name}が脱落しました",
                 })
 
-    async def _evaluate_single_investor(self, inv_id: str, founder_response: str) -> dict:
+    async def _evaluate_single_investor(
+        self, inv_id: str, founder_response: str, round_num: int = 1
+    ) -> dict:
         """One investor agent evaluates — this runs in parallel with the other 3."""
         state       = self.investor_states[inv_id]
         history_str = self._history_str(last=10)
@@ -416,7 +421,7 @@ Founder said: "{founder_response}"
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Ask: {self.config.get('askAmount')} for {self.config.get('askEquity')}%
 Your current confidence: {state['confidence']}%
-Round: {state['questionsAsked'] + 1} of {self.rounds}
+Round: {round_num} of {self.rounds}
 
 Conversation history:
 {history_str}
