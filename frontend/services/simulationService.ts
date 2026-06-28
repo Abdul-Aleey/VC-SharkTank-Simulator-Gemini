@@ -77,23 +77,16 @@ export class SimulationWebSocket {
     this._send({ action: 'founder_response', text });
   }
 
-  sendAcceptOffer(offerId: string): void {
-    this._send({ action: 'accept_offer', offerId });
+  sendAcceptOffer(investorId: string): void {
+    this._send({ action: 'accept_offer', investorId });
   }
 
-  sendCounterOffer(text: string): void {
-    this._send({ action: 'counter_offer', text });
+  sendCounterOffer(text: string, investorId?: string): void {
+    this._send({ action: 'counter_offer', text, investorId });
   }
 
   sendWalkAway(): void {
     this._send({ action: 'walk_away' });
-  }
-
-  sendAIBargain(offers: Offer[]): void {
-    // AI autopilot picks the best offer (lowest equity) and accepts it
-    if (offers.length === 0) return;
-    const best = [...offers].sort((a, b) => a.equity - b.equity)[0];
-    this._send({ action: 'accept_offer', offerId: best.id });
   }
 
   disconnect(): void {

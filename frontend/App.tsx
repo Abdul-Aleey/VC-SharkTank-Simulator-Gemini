@@ -64,6 +64,7 @@ export default function App() {
   const recognitionRef  = useRef<any>(null);
   const chatEndRef      = useRef<HTMLDivElement>(null);
   const wsRef           = useRef<SimulationWebSocket | null>(null);
+  const simModeRef      = useRef<SimMode>(config.mode);
 
   const t = TRANSLATIONS[config.language];
 
@@ -234,7 +235,6 @@ export default function App() {
 
       // Spoken messages: text appears and audio plays together, one at a time.
       case 'pitch':
-      case 'founder_response':
       case 'banter':
       case 'exit_speech':
       case 'offer_speech': {
@@ -243,6 +243,20 @@ export default function App() {
             senderName: event.senderName, text: event.text, timestamp: Date.now() },
           event.sender as any,
         );
+        break;
+      }
+
+      case 'founder_response': {
+        const msg = { id: Math.random().toString(), sender: event.sender as any,
+                      senderName: event.senderName, text: event.text, timestamp: Date.now() };
+        if (simModeRef.current === SimMode.REAL) {
+          // In REAL mode the user already said this — show text in chat but don't speak it
+          speechQueueRef.current = speechQueueRef.current.then(() => {
+            setChat(prev => [...prev, msg]);
+          });
+        } else {
+          queueMessage(msg, event.sender as any);
+        }
         break;
       }
 
@@ -264,32 +278,43 @@ export default function App() {
         break;
       }
 
-      // State updates are immediate — no speech involved.
+      // investor_update: thinking spinners appear immediately (while speech plays),
+      // but confidence / status results are queued so they reveal after speech ends.
       case 'investor_update': {
         const invId = event.investorId as InvestorId;
-        setInvestors(prev => {
-          const cur = prev[invId];
-          const wasAsking = cur.agentState === 'ASKING';
-          const nowIdle   = event.agentState === 'IDLE' || event.agentState === 'EVALUATING';
-          return {
-            ...prev,
-            [invId]: {
-              ...cur,
-              confidence:    event.confidence,
-              trend:         event.trend,
-              status:        event.status as InvestorStatus,
-              thoughtBubble: event.thoughtBubble,
-              strengths:     event.strengths,
-              weaknesses:    event.weaknesses,
-              risks:         event.risks,
-              agentState:    event.agentState as AgentState,
-              isThinking:    event.isThinking,
-              questionsAsked: (wasAsking && nowIdle)
-                ? cur.questionsAsked + 1
-                : cur.questionsAsked,
-            },
-          };
-        });
+        const snap  = { ...event };
+        const applyUpdate = () => {
+          setInvestors(prev => {
+            const cur       = prev[invId];
+            const wasAsking = cur.agentState === 'ASKING';
+            const nowIdle   = snap.agentState === 'IDLE' || snap.agentState === 'EVALUATING';
+            return {
+              ...prev,
+              [invId]: {
+                ...cur,
+                confidence:     snap.confidence,
+                trend:          snap.trend,
+                status:         snap.status as InvestorStatus,
+                thoughtBubble:  snap.thoughtBubble,
+                strengths:      snap.strengths,
+                weaknesses:     snap.weaknesses,
+                risks:          snap.risks,
+                agentState:     snap.agentState as AgentState,
+                isThinking:     snap.isThinking,
+                questionsAsked: (wasAsking && nowIdle)
+                  ? cur.questionsAsked + 1
+                  : cur.questionsAsked,
+              },
+            };
+          });
+        };
+        if (snap.isThinking) {
+          // Show thinking spinner immediately while dialogue speech is still playing
+          applyUpdate();
+        } else {
+          // Reveal confidence result only after the associated speech has finished
+          speechQueueRef.current = speechQueueRef.current.then(() => { applyUpdate(); });
+        }
         break;
       }
 
@@ -309,8 +334,12 @@ export default function App() {
       }
 
       case 'bargaining_start': {
-        setActiveOffers(event.offers);
-        setIsProcessing(false);
+        // Queue so offer panel appears only after all offer speeches have been spoken
+        const offers = event.offers;
+        speechQueueRef.current = speechQueueRef.current.then(() => {
+          setActiveOffers(offers);
+          setIsProcessing(false);
+        });
         break;
       }
 
@@ -351,35 +380,33 @@ export default function App() {
 
     addAgentLog('Google ADK Orchestrator', 'Initializing 5-agent multi-agent system...', 'info');
 
+    // Snapshot the mode so the event handler (a stale closure) can read it
+    simModeRef.current = config.mode;
+
     // Connect to the ADK backend
     const ws = new SimulationWebSocket(handleSimEvent);
     wsRef.current = ws;
     ws.connect(config, apiKey);
   };
 
-  // ── Bargaining actions (sent to backend via WebSocket) ────────────────────
+  // ── Bargaining actions (sent to backend via WebSocket, REAL mode only) ───
   const handleAcceptOffer = (offer: Offer) => {
     setActiveOffers([]);
     setIsProcessing(true);
-    wsRef.current?.sendAcceptOffer(offer.id);
+    wsRef.current?.sendAcceptOffer(offer.investors[0]);
   };
 
-  const handleCounterOffer = (counterText: string) => {
+  const handleCounterOffer = (counterText: string, investorId?: string) => {
     if (!counterText.trim()) return;
     setActiveOffers([]);
     setIsProcessing(true);
-    wsRef.current?.sendCounterOffer(counterText);
+    wsRef.current?.sendCounterOffer(counterText, investorId);
   };
 
   const handleWalkAway = () => {
     setActiveOffers([]);
     setIsProcessing(true);
     wsRef.current?.sendWalkAway();
-  };
-
-  const handleAIFounderBargainDecision = () => {
-    wsRef.current?.sendAIBargain(activeOffers);
-    setIsProcessing(true);
   };
 
   // ── REAL mode: founder submits a typed response ───────────────────────────
@@ -508,7 +535,6 @@ export default function App() {
             onAcceptOffer={handleAcceptOffer}
             onCounterOffer={handleCounterOffer}
             onWalkAway={handleWalkAway}
-            onAIBargain={handleAIFounderBargainDecision}
             onSpeakText={speakText}
             t={t}
           />

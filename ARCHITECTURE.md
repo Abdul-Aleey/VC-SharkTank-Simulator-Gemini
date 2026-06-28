@@ -189,11 +189,13 @@ run()
 
 Each investor starts at `confidence = 50` and updates after every founder response.
 
-| Threshold | Effect |
-|-----------|--------|
-| `confidence ≤ 25` | `status = OUT`, exit speech generated |
-| `confidence ≥ 85` | `status = INVEST` |
-| `25 < confidence < 85` | `status = ACTIVE` (continues asking questions) |
+| Threshold | When | Effect |
+|-----------|------|--------|
+| `confidence ≤ 25` | During rounds | `status = OUT`, exit speech generated, investor stops participating |
+| `confidence > 25` | After all rounds | `status = INVEST` set in `_phase_bargaining()` before offer generation |
+| `25 < confidence` | During rounds | `status = ACTIVE`, investor keeps asking questions every round |
+
+Critically, **INVEST status is never set during Q&A rounds**. Investors whose confidence exceeds 85 mid-round stay ACTIVE and keep asking questions. Only after all rounds complete does `_phase_bargaining()` scan for qualifying investors (confidence > 25, not OUT) and set their status to INVEST before generating offers. This ensures all rounds always complete in full before the offer phase begins.
 
 The confidence value is set entirely by the investor's own ADK agent — the orchestrator asks each agent to return a JSON object including a `confidence` integer. The agent decides how convincing the founder's answer was relative to their focus area.
 
@@ -235,7 +237,22 @@ The speech is grounded in `chat_history`, so every departure is unique to what w
 
 ### Bargaining Logic
 
-After all rounds complete, investors with `confidence > 25 and status != OUT` qualify for the offer phase.
+After all rounds complete, `_phase_bargaining()` determines qualifying investors (confidence > 25, not OUT), sets their `status = INVEST`, emits investor updates, then announces which investors are making offers.
+
+The bargaining phase runs as a **negotiation loop** — multi-round back-and-forth, fully personality-driven, no hardcoded outcomes:
+
+**AI mode**: `_ai_founder_decide_action()` feeds the FounderAgent all current offers, and the agent decides: accept the best offer, counter a specific shark, or walk away. The agent speaks its reasoning to the room first. The backend runs the entire loop autonomously (max 4 rounds). The offer panel shows read-only with an "AI Founder is negotiating…" indicator.
+
+**REAL mode**: Offer cards show Accept / Counter / Walk Away buttons per shark. The backend waits for each user action. Counter opens a modal showing the specific shark's name.
+
+**Counter-counter flow**: `_evaluate_counter_offer()` asks the targeted shark's ADK agent to respond in character. Three possible outcomes:
+- `{accepted: true}` → deal closes immediately
+- `{counter_offer: {cash, equity, terms}}` → shark revised their terms; `bargaining_start` is re-emitted with updated offer, loop continues
+- `{accepted: false, counter_offer: null}` → hard reject; offer removed from table
+
+If all offers are rejected/withdrawn, negotiation breaks down and the report generates with no deal.
+
+**Acceptance**: `_close_deal()` calls `_generate_acceptance_speech()` — the FounderAgent names the specific shark(s) explicitly before the deal confirmation system message.
 
 **Individual offers** are calculated from each qualifier's final confidence:
 
@@ -304,6 +321,10 @@ All simulation state lives in `App.tsx` and is passed down as props. No external
 ### Speech Queue System
 
 This is the most important frontend design decision. Naively calling `window.speechSynthesis.speak()` and `setChat()` as events arrive would cause all messages to appear at once (React batches state updates) and audio to cancel itself (each `speak()` call cancels the previous one).
+
+**Investor confidence updates** are also routed through the queue. When evaluation results arrive, confidence meters only update after the associated dialogue has been spoken — so the user hears the question and answer before seeing the meter change. The exception is the "thinking" state (isThinking=true): thinking spinners appear immediately when evaluation starts, so the user can see investors are evaluating while the dialogue speech plays.
+
+**Offer panel** (`bargaining_start`) is also queued — the offer cards only appear after all shark offer speeches have been spoken, not while they're still being read out.
 
 The fix is a **serialised Promise chain**:
 

@@ -174,6 +174,14 @@ class SimulationOrchestrator:
 
                 self.investor_states[inv_id]["questionsAsked"] += 1
 
+        # All rounds complete — announce before moving to offers
+        rounds_done_text = (
+            f"全{self.rounds}ラウンドのピッチが終了しました。オファーフェーズに移行します。"
+            if self.is_ja else
+            f"All {self.rounds} pitch rounds complete. Moving to the offer phase."
+        )
+        await self._emit("system_message", {"text": rounds_done_text})
+
         await self._phase_bargaining()
 
     async def receive_founder_response(self, text: str):
@@ -345,10 +353,9 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                 state["confidence"] = 0
                 state["agentState"] = "OUT"
                 exit_speeches.append(inv_id)
-            elif new_conf >= CONFIDENCE_INVEST:
-                state["status"]     = "INVEST"
-                state["agentState"] = "INVESTED"
             else:
+                # Confidence can exceed 85 during rounds but INVEST status is only
+                # determined after all rounds complete — investors keep asking questions
                 state["agentState"] = "IDLE"
 
         await self._emit_all_investor_updates()
@@ -487,94 +494,352 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             await self._generate_report(deal=None)
             return
 
-        offers = self._build_offers(qualifying)
+        # All rounds done — mark qualifying investors as INVEST
+        for inv_id in qualifying:
+            self.investor_states[inv_id]["status"]     = "INVEST"
+            self.investor_states[inv_id]["agentState"] = "INVESTED"
+        await self._emit_all_investor_updates()
 
-        # Present each offer with speech
-        for offer in offers:
-            rep_id   = offer["investors"][0]
-            rep_name = INVESTOR_PERSONAS[rep_id]["name"]
+        investor_names = ", ".join(INVESTOR_PERSONAS[i]["name"] for i in qualifying)
+        await self._emit("system_message", {
+            "text": (
+                f"オファーフェーズ開始。{investor_names}がオファーを提示します。"
+                if self.is_ja else
+                f"Offer phase begins. {investor_names} will now present their terms."
+            )
+        })
+
+        # Build mutable offers dict keyed by lead investor id
+        offers_list   = self._build_offers(qualifying)
+        active_offers = {o["investors"][0]: o for o in offers_list}
+
+        # Each investor speaks their offer one at a time
+        for lead_id, offer in active_offers.items():
+            rep_name = INVESTOR_PERSONAS[lead_id]["name"]
             if self.is_ja:
-                offer_speech = f"私は{offer['cash']}を株式{offer['equity']}%でオファーします。条件：{offer['terms']}"
+                offer_speech = (f"私は{offer['cash']}を株式{offer['equity']}%でオファーします。"
+                                f"条件：{offer['terms']}")
             else:
-                offer_speech = f"I am offering {offer['cash']} for {offer['equity']}% equity. Terms: {offer['terms']}"
-
-            self._add_to_history(rep_id, offer_speech)
-            await self._log(
-                f"{rep_name} Agent",
-                f"Presenting offer: {offer['cash']} for {offer['equity']}%",
-                "success",
-            )
+                offer_speech = (f"I'm offering {offer['cash']} for {offer['equity']}% equity. "
+                                f"Terms: {offer['terms']}")
+            self._add_to_history(lead_id, offer_speech)
+            await self._log(f"{rep_name} Agent",
+                            f"Presenting offer: {offer['cash']} for {offer['equity']}%", "success")
             await self._emit("offer_speech", {
-                "sender":     rep_id,
-                "senderName": rep_name,
-                "text":       offer_speech,
-                "offer":      offer,
+                "sender": lead_id, "senderName": rep_name,
+                "text": offer_speech, "offer": offer,
             })
 
-        await self._emit("bargaining_start", {"offers": offers})
+        # Show offer panel after all speeches are spoken
+        await self._emit("bargaining_start", {"offers": list(active_offers.values())})
 
-        # Wait for the frontend to send an action
-        action = await self._bargain_action.get()
-        action_type = action.get("type")
+        # ── Negotiation loop ────────────────────────────────────────────────
+        # REAL mode: unbounded — the human decides when to stop (accept/walk away).
+        # AI mode: capped at 4 rounds then force-accepts best remaining offer.
+        # Every terminal path calls `return`; the loop only continues when
+        # a shark counter-counters or an offer is rejected but others remain.
+        MAX_AI_ROUNDS = 4
+        neg_round     = 0
 
-        if action_type == "accept":
-            offer_id     = action.get("offerId")
-            accepted     = next((o for o in offers if o["id"] == offer_id), offers[0])
-            rep_name     = INVESTOR_PERSONAS[accepted["investors"][0]]["name"]
-            success_text = (
-                f"素晴らしい！{rep_name}と{accepted['cash']}（株式{accepted['equity']}%）で合意しました！"
-                if self.is_ja else
-                f"Fantastic! Deal sealed with {rep_name} for {accepted['cash']} at {accepted['equity']}% equity!"
-            )
-            await self._emit("system_message", {"text": success_text})
-            await self._generate_report(deal=accepted)
+        while active_offers:
+            neg_round += 1
 
-        elif action_type == "counter":
-            counter_text = action.get("text", "")
-            founder_counter = f"{'カウンターオファー' if self.is_ja else 'Counter-offer'}: {counter_text}"
-            self._add_to_history("founder", founder_counter)
-            await self._emit("founder_response", {
-                "sender":     "founder",
-                "senderName": self.config.get("founderName", "Founder"),
-                "text":       founder_counter,
-            })
-            # 50 % chance investors accept
-            if random.random() < 0.5 and offers:
-                accepted = offers[0]
-                accept_text = (
-                    "カウンターオファーが承認されました！" if self.is_ja
-                    else "Counter-offer accepted! Congratulations!"
-                )
-                await self._emit("system_message", {"text": accept_text})
-                await self._generate_report(deal=accepted)
+            # AI-only safety: after 4 rounds force-close on best remaining offer
+            if self.mode == "ai" and neg_round > MAX_AI_ROUNDS:
+                best_id = min(active_offers, key=lambda i: active_offers[i]["equity"])
+                name    = INVESTOR_PERSONAS[best_id]["name"]
+                await self._emit("system_message", {
+                    "text": (f"交渉を終了。{name}の最終オファーで合意します。"
+                             if self.is_ja else
+                             f"Concluding negotiation — accepting {name}'s current offer.")
+                })
+                await self._close_deal(active_offers[best_id])
+                return
+
+            # ── Get next action ────────────────────────────────────────────
+            if self.mode == "ai":
+                decision     = await self._ai_founder_decide_action(active_offers)
+                action_type  = decision.get("action", "accept")
+                target_id    = decision.get("investorId", list(active_offers.keys())[0])
+                counter_text = decision.get("counterText", "")
+
+                # Founder speaks their reasoning to the room
+                speech = decision.get("speech", "")
+                if speech:
+                    self._add_to_history("founder", speech)
+                    await self._set_founder_agent_state("PITCHING")
+                    await self._emit("founder_response", {
+                        "sender":     "founder",
+                        "senderName": self.config.get("founderName", "Founder"),
+                        "text":       speech,
+                    })
+                    await self._set_founder_agent_state("IDLE")
             else:
-                reject_text = (
-                    "残念ながら、その条件では合意できません。" if self.is_ja
-                    else "Unfortunately we cannot agree to those terms."
-                )
-                await self._emit("system_message", {"text": reject_text})
-                await self._generate_report(deal=None)
+                # REAL mode — block until the user sends an action
+                payload      = await self._bargain_action.get()
+                action_type  = payload.get("type")
+                target_id    = payload.get("investorId", list(active_offers.keys())[0])
+                counter_text = payload.get("text", "")
 
-        else:  # walk_away
-            cfg = self.config
-            walk_text = (
-                "起業家はすべてのオファーを辞退し、手ぶらで立ち去りました。"
+            # Guard: target must exist in active offers
+            if target_id not in active_offers:
+                target_id = list(active_offers.keys())[0]
+
+            # ── Process action ─────────────────────────────────────────────
+            if action_type == "accept":
+                await self._close_deal(active_offers[target_id])
+                return  # ← terminates
+
+            elif action_type == "counter":
+                target_offer = active_offers[target_id]
+                target_name  = INVESTOR_PERSONAS[target_id]["name"]
+
+                # REAL mode: announce counter (AI mode already spoke above)
+                if self.mode == "real":
+                    fc = (f"{target_name}へのカウンターオファー：{counter_text}"
+                          if self.is_ja else
+                          f"Counter-offer to {target_name}: {counter_text}")
+                    self._add_to_history("founder", fc)
+                    await self._set_founder_agent_state("PITCHING")
+                    await self._emit("founder_response", {
+                        "sender":     "founder",
+                        "senderName": self.config.get("founderName", "Founder"),
+                        "text":       fc,
+                    })
+                    await self._set_founder_agent_state("IDLE")
+
+                await self._emit("system_message", {
+                    "text": (f"{target_name}がカウンターを検討しています..."
+                             if self.is_ja else
+                             f"{target_name} is evaluating your counter...")
+                })
+
+                result = await self._evaluate_counter_offer(
+                    target_id, counter_text, target_offer
+                )
+
+                # Shark speaks their response in their own voice
+                self._add_to_history(target_id, result["speech"])
+                await self._emit("banter", {
+                    "sender":     target_id,
+                    "senderName": target_name,
+                    "text":       result["speech"],
+                })
+
+                if result["accepted"]:
+                    await self._close_deal(target_offer)
+                    return  # ← terminates
+
+                elif result.get("counter_offer"):
+                    # Shark counter-countered — update offer and re-show panel
+                    cc      = result["counter_offer"]
+                    updated = {
+                        **target_offer,
+                        "cash":    cc.get("cash",   target_offer["cash"]),
+                        "equity":  cc.get("equity", target_offer["equity"]),
+                        "terms":   cc.get("terms",  target_offer["terms"]),
+                        "revised": True,
+                    }
+                    active_offers[target_id] = updated
+                    await self._emit("system_message", {
+                        "text": (
+                            f"{target_name}がオファーを修正：{updated['cash']}、株式{updated['equity']}%"
+                            if self.is_ja else
+                            f"{target_name} revised their offer: {updated['cash']} for {updated['equity']}%."
+                        )
+                    })
+                    # bargaining_start re-shows panel with updated terms; loop continues
+                    await self._emit("bargaining_start",
+                                     {"offers": list(active_offers.values())})
+
+                else:
+                    # Hard reject — remove this offer from the table
+                    del active_offers[target_id]
+                    await self._emit("system_message", {
+                        "text": (f"{target_name}はオファーを撤回しました。"
+                                 if self.is_ja else
+                                 f"{target_name} withdrew their offer.")
+                    })
+                    if not active_offers:
+                        await self._emit("system_message", {
+                            "text": ("交渉決裂。残りのオファーがありません。"
+                                     if self.is_ja else
+                                     "Negotiation broke down. No remaining offers.")
+                        })
+                        await self._generate_report(deal=None)
+                        return  # ← terminates
+                    # Show remaining offers; loop continues
+                    await self._emit("bargaining_start",
+                                     {"offers": list(active_offers.values())})
+
+            else:  # walk_away
+                await self._emit("system_message", {
+                    "text": ("起業家はすべてのオファーを辞退し、立ち去りました。"
+                             if self.is_ja else
+                             "The entrepreneur declined all offers and walked away.")
+                })
+                snark = (
+                    "君はただのマネー・インシネレーターだ。泣きながら家に帰るんだね。"
+                    if self.is_ja else
+                    "You are just a cash incinerator. Go home and cry to your mother."
+                )
+                self._add_to_history("vincent", snark)
+                await self._emit("banter", {
+                    "sender":     "vincent",
+                    "senderName": INVESTOR_PERSONAS["vincent"]["name"],
+                    "text":       snark,
+                })
+                await self._generate_report(deal=None)
+                return  # ← terminates
+
+        # Safety net: active_offers emptied without an explicit return above
+        await self._generate_report(deal=None)
+
+    async def _close_deal(self, offer: dict):
+        """Founder accepts an offer: speaks acceptance, emits deal confirmation, generates report."""
+        acceptance = await self._generate_acceptance_speech(offer)
+        self._add_to_history("founder", acceptance)
+        await self._set_founder_agent_state("PITCHING")
+        await self._emit("founder_response", {
+            "sender": "founder",
+            "senderName": self.config.get("founderName", "Founder"),
+            "text": acceptance,
+        })
+        await self._set_founder_agent_state("IDLE")
+
+        investors_str = (" & " if not self.is_ja else "と").join(
+            INVESTOR_PERSONAS[i]["name"] for i in offer["investors"]
+        )
+        await self._emit("system_message", {
+            "text": (
+                f"成立！{investors_str}と{offer['cash']}（株式{offer['equity']}%）で合意！"
                 if self.is_ja else
-                "The entrepreneur declined all offers and walked away empty-handed."
+                f"Deal sealed with {investors_str} — {offer['cash']} for {offer['equity']}% equity!"
             )
-            await self._emit("system_message", {"text": walk_text})
-            snark = (
-                "君はただのマネー・インシネレーターだ。泣きながら家に帰るんだね。"
-                if self.is_ja else
-                "You are just a cash incinerator. Go home and cry to your mother."
-            )
-            self._add_to_history("vincent", snark)
-            await self._emit("banter", {
-                "sender":     "vincent",
-                "senderName": INVESTOR_PERSONAS["vincent"]["name"],
-                "text":       snark,
-            })
-            await self._generate_report(deal=None)
+        })
+        await self._generate_report(deal=offer)
+
+    async def _ai_founder_decide_action(self, active_offers: dict) -> dict:
+        """FounderAgent evaluates all current offers and decides negotiation strategy."""
+        cfg = self.config
+        offers_summary = "\n".join(
+            f"- {INVESTOR_PERSONAS[inv_id]['name']} ({inv_id}): "
+            f"{o['cash']} for {o['equity']}% equity. Terms: {o.get('terms', 'none')}"
+            for inv_id, o in active_offers.items()
+        )
+        prompt = f"""NEGOTIATE as founder
+You are {cfg.get('founderName')}, founder of {cfg.get('startupName')}.
+Original ask: {cfg.get('askAmount')} for {cfg.get('askEquity')}% equity.
+Your personality: {cfg.get('personality', 'excellent')}
+
+Offers currently on the table:
+{offers_summary}
+
+Recent negotiation:
+{self._history_str(last=6)}
+
+Decide your next move. Consider equity dilution, investor value, and closing the deal.
+Valid investor IDs: {', '.join(active_offers.keys())}
+
+Return ONLY valid JSON, no markdown fences:
+{{
+  "action": "accept" | "counter" | "walk_away",
+  "investorId": "<exact investor id from the list above — required for accept/counter>",
+  "speech": "<what you say to the room, 25-40 words, strategic, in your own voice>",
+  "counterText": "<your specific counter-proposal — required if action is counter>"
+}}
+Language: {'Japanese' if self.is_ja else 'English'}"""
+
+        raw     = await self._run_founder_agent(prompt)
+        best_id = min(active_offers.keys(), key=lambda i: active_offers[i]["equity"])
+        fallback = {
+            "action": "accept",
+            "investorId": best_id,
+            "speech": (f"{INVESTOR_PERSONAS[best_id]['name']}のオファーを受け入れます。"
+                       if self.is_ja else
+                       f"I'll accept {INVESTOR_PERSONAS[best_id]['name']}'s offer. Let's make this happen."),
+            "counterText": "",
+        }
+        result = self._parse_json(raw, fallback)
+        # Validate investorId against active offers
+        if result.get("investorId") not in active_offers:
+            result["investorId"] = best_id
+        return result
+
+    async def _generate_acceptance_speech(self, accepted_offer: dict) -> str:
+        """Founder speaks their acceptance, naming the shark(s) explicitly."""
+        sep = "と" if self.is_ja else " and "
+        investors_str = sep.join(
+            INVESTOR_PERSONAS[i]["name"] for i in accepted_offer["investors"]
+        )
+
+        if self.mode == "ai":
+            prompt = f"""GENERATE ACCEPTANCE SPEECH
+You are {self.config.get('founderName')}, founder of {self.config.get('startupName')}.
+You have just accepted an offer from {investors_str}.
+Deal: {accepted_offer['cash']} for {accepted_offer['equity']}% equity.
+Terms: {accepted_offer['terms']}
+
+Write a genuine, excited acceptance speech (under 40 words).
+Name {investors_str} explicitly. Express what this partnership means for your startup.
+No meta-text.
+Language: {'Japanese' if self.is_ja else 'English'}"""
+            text = await self._run_founder_agent(prompt)
+            if text.strip():
+                return text.strip()
+
+        if self.is_ja:
+            return (f"ありがとうございます、{investors_str}！喜んでお受けします。"
+                    f"{self.config.get('startupName')}の未来のために一緒に頑張りましょう！")
+        return (f"Thank you, {investors_str}! I'm thrilled to accept. "
+                f"This is a huge moment for {self.config.get('startupName')} — "
+                f"let's build something incredible together!")
+
+    async def _evaluate_counter_offer(
+        self, inv_id: str, counter_text: str, current_offer: dict
+    ) -> dict:
+        """
+        The specific shark's ADK agent evaluates a counter-offer in character.
+        Returns: accepted=True, OR counter_offer with revised terms, OR hard reject (both False/None).
+        """
+        name    = INVESTOR_PERSONAS[inv_id]["name"]
+        persona = INVESTOR_PERSONAS[inv_id]
+        prompt = f"""NEGOTIATE as {name}
+You are {name}. Investment focus: {persona['focus']}.
+You offered {current_offer['cash']} for {current_offer['equity']}% equity.
+The founder countered: "{counter_text}"
+
+Act in character based on your personality. Options:
+- Accept if terms are reasonable
+- Counter back with a revised offer (adjust equity ±3-8%, modify conditions)
+- Hard reject if the counter is too far from your position (no deal)
+
+Return ONLY valid JSON, no markdown fences:
+{{
+  "accepted": true or false,
+  "speech": "<your response in your voice, 20-30 words>",
+  "counter_offer": {{
+    "cash": "<dollar amount e.g. $1.5M>",
+    "equity": <integer percentage>,
+    "terms": "<full deal conditions — include ALL financial structure: royalties, interest rate, milestone triggers, board seat, convertible note details, etc. Be specific and complete.>"
+  }} or null
+}}
+Rules:
+- If accepted=true: counter_offer must be null
+- If counter_offer is set: accepted must be false
+- Hard reject (too far apart): accepted=false AND counter_offer=null
+Language: {'Japanese' if self.is_ja else 'English'}"""
+
+        raw = await self._run_investor_agent(inv_id, prompt)
+        fallback_speech = (
+            "その条件では合意できません。" if self.is_ja
+            else "Those terms don't work for me."
+        )
+        return self._parse_json(raw, {
+            "accepted": False,
+            "speech": fallback_speech,
+            "counter_offer": None,
+        })
 
     def _build_offers(self, qualifying: list) -> list:
         offers       = []
@@ -599,6 +864,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                               if self.is_ja else
                               f"Joint investment by {names}. Full access to both networks."),
                 "isJoint":   True,
+                "revised":   False,
             })
 
         for inv_id in qualifying:
@@ -627,6 +893,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                 "equity":    equity,
                 "terms":     terms,
                 "isJoint":   False,
+                "revised":   False,
             })
 
         return offers

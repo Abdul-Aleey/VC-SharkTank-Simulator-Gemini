@@ -32,9 +32,8 @@ interface Props {
   onResponseSubmit: (text?: string) => void;
   onAIAssist: () => void;
   onAcceptOffer: (offer: Offer) => void;
-  onCounterOffer: (counterText: string) => void;
+  onCounterOffer: (counterText: string, investorId?: string) => void;
   onWalkAway: () => void;
-  onAIBargain: () => void;
   onSpeakText: (text: string, speaker: 'founder' | InvestorId | 'system') => void;
   t: any; // translation object
 }
@@ -52,7 +51,7 @@ export default function SimulationScreen({
   isMuted, isAutoplay, isListening, inputText, activeOffers,
   chatEndRef, onInputChange, onToggleMute, onToggleAutoplay,
   onToggleListening, onResponseSubmit, onAIAssist,
-  onAcceptOffer, onCounterOffer, onWalkAway, onAIBargain,
+  onAcceptOffer, onCounterOffer, onWalkAway,
   onSpeakText, t
 }: Props) {
   // Local UI state — doesn't need to live in App because it's only relevant here
@@ -62,7 +61,7 @@ export default function SimulationScreen({
 
   const handleSubmitCounter = () => {
     if (!counterText.trim()) return;
-    onCounterOffer(counterText.trim());
+    onCounterOffer(counterText.trim(), counterOfferTarget?.investors[0]);
     setCounterOfferTarget(null);
     setCounterText('');
   };
@@ -287,58 +286,74 @@ export default function SimulationScreen({
                   return (
                     <div
                       key={offer.id}
-                      className="bg-slate-800/40 border border-white/5 rounded-xl p-4 space-y-3 hover:border-indigo-500/30 transition-all"
+                      className={`border rounded-xl p-4 space-y-3 transition-all ${
+                        offer.revised
+                          ? 'bg-amber-900/10 border-amber-500/30 hover:border-amber-400/50'
+                          : 'bg-slate-800/40 border-white/5 hover:border-indigo-500/30'
+                      }`}
                     >
                       <div className="flex justify-between items-start">
-                        <div>
-                          <span className="text-xs text-indigo-400 font-bold block">
-                            {offer.isJoint ? t.jointOffer : 'Offer'}
-                          </span>
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-indigo-400 font-bold">
+                              {offer.isJoint ? t.jointOffer : 'Offer'}
+                            </span>
+                            {offer.revised && (
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                                Revised ✓
+                              </span>
+                            )}
+                          </div>
                           <span className="font-bold text-sm text-slate-200">{names}</span>
                         </div>
                         <span className="text-lg font-extrabold text-emerald-400">{offer.cash}</span>
                       </div>
-                      <div className="flex justify-between text-xs text-slate-400">
-                        <span>Equity: <strong className="text-slate-200">{offer.equity}%</strong></span>
+                      <div className="flex items-center gap-3 text-xs">
+                        <span className="text-slate-400">Equity</span>
+                        <span className="font-bold text-white text-sm">{offer.equity}%</span>
                       </div>
-                      <p className="text-xs text-slate-300 italic">"{offer.terms}"</p>
-                      <div className="grid grid-cols-2 gap-2 pt-2">
-                        <button
-                          onClick={() => onAcceptOffer(offer)}
-                          className="py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition-all"
-                        >
-                          {t.acceptDeal}
-                        </button>
-                        <button
-                          onClick={() => { setCounterOfferTarget(offer); setCounterText(''); }}
-                          className="py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-lg transition-all"
-                        >
-                          {t.counterOffer}
-                        </button>
+                      <div className="bg-slate-900/60 rounded-lg px-3 py-2 text-xs text-slate-300 leading-relaxed border border-white/5">
+                        {offer.terms}
                       </div>
+                      {/* Action buttons — REAL mode only; AI mode negotiates autonomously */}
+                      {config.mode === SimMode.REAL && (
+                        <div className="grid grid-cols-2 gap-2 pt-2">
+                          <button
+                            onClick={() => onAcceptOffer(offer)}
+                            className="py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition-all"
+                          >
+                            {t.acceptDeal}
+                          </button>
+                          <button
+                            onClick={() => { setCounterOfferTarget(offer); setCounterText(''); }}
+                            className="py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-lg transition-all"
+                          >
+                            {t.counterOffer}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
 
-                {/* AI autopilot bargain button */}
-                {config.mode === SimMode.AI && (
+                {/* Walk away — REAL mode only */}
+                {config.mode === SimMode.REAL && (
                   <button
-                    onClick={onAIBargain}
-                    className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2"
+                    onClick={onWalkAway}
+                    className="w-full py-3 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 rounded-xl transition-all text-xs font-bold flex flex-col items-center justify-center gap-1"
                   >
-                    <Sparkles className="w-4 h-4" />
-                    AI Decide & Bargain
+                    <span>{t.walkAway}</span>
+                    <span className="text-[10px] text-red-400/60 font-normal">{t.walkAwayDesc}</span>
                   </button>
                 )}
 
-                {/* Walk away — decline all offers */}
-                <button
-                  onClick={onWalkAway}
-                  className="w-full py-3 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 rounded-xl transition-all text-xs font-bold flex flex-col items-center justify-center gap-1"
-                >
-                  <span>{t.walkAway}</span>
-                  <span className="text-[10px] text-red-400/60 font-normal">{t.walkAwayDesc}</span>
-                </button>
+                {/* AI mode: show that negotiation is happening autonomously */}
+                {config.mode === SimMode.AI && (
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs">
+                    <Sparkles className="w-3.5 h-3.5 animate-pulse shrink-0" />
+                    AI Founder is negotiating…
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -468,13 +483,22 @@ export default function SimulationScreen({
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
           <div className="bg-slate-900 border border-white/10 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
             <div className="flex justify-between items-center">
-              <h3 className="text-lg font-bold text-white">{t.counterOffer}</h3>
+              <div>
+                <h3 className="text-lg font-bold text-white">{t.counterOffer}</h3>
+                <p className="text-xs text-indigo-400 mt-0.5">
+                  Negotiating with{' '}
+                  <strong>{INVESTOR_PROFILES[counterOfferTarget.investors[0] as InvestorId]?.name}</strong>
+                  {counterOfferTarget.isJoint && counterOfferTarget.investors[1] &&
+                    <> &amp; <strong>{INVESTOR_PROFILES[counterOfferTarget.investors[1] as InvestorId]?.name}</strong></>
+                  }
+                </p>
+              </div>
               <button onClick={() => setCounterOfferTarget(null)} className="p-1.5 hover:bg-white/5 rounded-lg text-slate-400 hover:text-white transition-all">
                 <X className="w-5 h-5" />
               </button>
             </div>
             <p className="text-xs text-slate-400">
-              Current offer: <strong className="text-slate-200">{counterOfferTarget.cash}</strong> for{' '}
+              Their offer: <strong className="text-slate-200">{counterOfferTarget.cash}</strong> for{' '}
               <strong className="text-slate-200">{counterOfferTarget.equity}%</strong> equity.
             </p>
             <textarea

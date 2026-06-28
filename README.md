@@ -38,7 +38,8 @@ The backend is a Python FastAPI server that orchestrates Google ADK agents. The 
 - **Random question order** — question sequence is shuffled each round so no investor always goes first
 - **Real-time speech synthesis** — each character has a distinct voice; text and audio advance together via a serialised Promise queue
 - **Two founder modes** — you type/speak your own answers (Real Entrepreneur) or let the AI founder handle everything (AI Autopilot)
-- **Bargaining phase** — investors generate offers, you can accept, counter-offer, or walk away
+- **Bargaining phase** — after all rounds complete, qualifying investors present their offers one by one. Accept, counter-offer (routed to that specific shark's ADK agent who evaluates in their own voice), or walk away
+- **Founder acceptance speech** — the founder's ADK agent generates an acceptance line naming the shark when a deal is sealed
 - **Final evaluation memo** — detailed VC report with readiness score, verdict, risk grid, and per-investor feedback
 - **Bilingual** — full English and Japanese support throughout
 - **Gemini model selector** — choose between Gemini 2.5 Flash, 2.5 Pro, or 3.5 Flash per session
@@ -305,7 +306,7 @@ The simulation runs over a single WebSocket connection at `/ws-simulate`.
 | `start` | `{config, apiKey}` | On connect, always first |
 | `founder_response` | `{text}` | Real mode: after each investor question |
 | `accept_offer` | `{offerId}` | Bargaining phase |
-| `counter_offer` | `{text}` | Bargaining phase |
+| `counter_offer` | `{text, investorId}` | Bargaining phase — routed to that specific shark's agent |
 | `walk_away` | `{}` | Bargaining phase |
 
 ### Server → Client (event types)

@@ -273,7 +273,7 @@ flowchart TD
 
 ## 8. Confidence & Status Update Flow
 
-How a single investor's state transitions across the simulation.
+How a single investor's state transitions across the simulation. INVEST status is only set **after all rounds complete** — investors stay ACTIVE during Q&A no matter how high confidence goes.
 
 ```mermaid
 stateDiagram-v2
@@ -282,18 +282,24 @@ stateDiagram-v2
     ACTIVE --> ASKING : _generate_question called
     ASKING --> ACTIVE : Question emitted\nagentState → IDLE
 
-    ACTIVE --> EVALUATING : _parallel_evaluate called\nisThinking = true
+    ACTIVE --> EVALUATING : _parallel_evaluate called\nisThinking = true (immediate)
 
-    EVALUATING --> ACTIVE : 25 < new_conf < 85\nagentState → IDLE
-    EVALUATING --> INVESTED : new_conf ≥ 85\nagentState → INVESTED\nstatus → INVEST
+    EVALUATING --> ACTIVE : new_conf > 25\nagentState → IDLE\n(even if conf ≥ 85, stays ACTIVE\nuntil all rounds done)
     EVALUATING --> OUT : new_conf ≤ 25\nagentState → OUT\nstatus → OUT\nexit speech generated
 
     ACTIVE --> BANTERING : _maybe_banter triggered\n25% chance
     BANTERING --> ACTIVE : Banter emitted\nagentState → IDLE
 
-    INVESTED --> INVESTED : Stays invested\nno more questions asked\nstill evaluates
+    note right of ACTIVE
+        confidence keeps adjusting
+        every round but no offer
+        is made mid-simulation
+    end note
 
-    OUT --> [*] : No further participation\nExcluded from questions\nand evaluations
+    ACTIVE --> INVESTED : _phase_bargaining starts\nconf > 25 AND not OUT\nstatus → INVEST (set here)
+    INVESTED --> INVESTED : Presents offer\nWaits for founder decision
+
+    OUT --> [*] : No further participation
 ```
 
 ---
@@ -366,51 +372,49 @@ flowchart TD
 
 ## 11. Bargaining Phase Flow
 
-Offer generation, presentation, and user action handling.
+Multi-round negotiation loop — AI mode runs autonomously; REAL mode waits for user each iteration.
 
 ```mermaid
 flowchart TD
-    A[_phase_bargaining called\nafter all rounds] --> B[qualifying = investors\nconf > 25 AND status != OUT]
-    B --> C{qualifying\nempty?}
-    C -->|Yes| D[emit system_message\nNo investors met threshold]
-    D --> E[_generate_report deal=None]
+    A[_phase_bargaining\nafter all rounds] --> B[qualifying = conf > 25\nAND not OUT]
+    B --> C{any qualifying?}
+    C -->|No| D[emit no-deal message\n_generate_report None]
 
-    C -->|No| F[_build_offers qualifying]
+    C -->|Yes| E[Set status=INVEST\nfor all qualifying\nemit investor_updates]
+    E --> F[_build_offers qualifying\nactive_offers dict keyed\nby lead investor id]
+    F --> G[Each shark speaks\ntheir offer one by one\nemit offer_speech per shark]
+    G --> H[emit bargaining_start\nall current offers\nqueued after speeches]
 
-    F --> G{2+ investors\nwith conf 75–90?}
-    G -->|Yes — 30% chance| H[Create joint offer\nboth investor names\n1.5× equity ask]
-    G -->|No| I[Skip joint offer]
+    H --> I{mode?}
+    I -->|AI| J[_ai_founder_decide_action\nFounderAgent evaluates ALL offers\nreturns action + speech]
+    J --> JA[Founder speaks\nnegotiation strategy\nemit founder_response]
+    I -->|REAL| K[Wait for user\nbargain_action.get blocks\noffer panel shows buttons]
 
-    H & I --> J[For each remaining\nqualifying investor]
-    J --> K{Confidence\nlevel?}
-    K -->|≥ 85| L[Exact terms\nrequested]
-    K -->|70–84| M[Ask amount\n1.2× equity + royalty]
-    K -->|26–69| N[Ask amount\n2.5× equity\ncapped at 49%]
+    JA & K --> L{action.type?}
 
-    L & M & N --> O[Add offer to list]
-    O --> P[For each offer:\nemit offer_speech\nrepresentative investor speaks]
-    P --> Q[emit bargaining_start\nall offers array]
-    Q --> R[Frontend: show offer cards\nclear activeOffers on action]
+    L -->|accept| M[_close_deal offer\n_generate_acceptance_speech\nFounderAgent names shark]
+    M --> MA[emit founder_response\nfounder speaks acceptance]
+    MA --> MB[emit system_message\nDeal sealed!]
+    MB --> MC[_generate_report deal]
 
-    R --> S[Wait for bargain_action\nqueue.get blocks]
+    L -->|counter| N[target = action.investorId\nREAL: founder states counter\nAI: already spoke above]
+    N --> O[_evaluate_counter_offer\nTARGET shark ADK agent\nevaluates in character]
+    O --> P[Shark speaks result\nemit banter own voice]
+    P --> Q{result?}
+    Q -->|accepted=true| M
+    Q -->|counter_offer not null| R[Shark counter-countered\nUpdate active_offers\nemit bargaining_start\nwith revised terms]
+    R --> I
+    Q -->|hard reject| S[Remove shark's offer\nfrom active_offers]
+    S --> T{any offers\nremaining?}
+    T -->|Yes| U[emit bargaining_start\nremaining offers only]
+    U --> I
+    T -->|No| V[emit negotiation\nbroke down\n_generate_report None]
 
-    S --> T{action.type?}
+    L -->|walk_away| W[emit walked away\nVincent delivers snark]
+    W --> V
 
-    T -->|accept| U[accepted = offers\nfind by offerId]
-    U --> V[emit system_message\nDeal sealed!]
-    V --> W[_generate_report\ndeal=accepted]
-
-    T -->|counter| X[founder_counter text\n_add_to_history]
-    X --> Y[emit founder_response]
-    Y --> Z{random < 0.5?}
-    Z -->|Yes — investors accept| AA[emit system_message\nCounter accepted!]
-    AA --> W
-    Z -->|No — rejected| AB[emit system_message\nCannot agree]
-    AB --> AC[_generate_report deal=None]
-
-    T -->|walk_away| AD[emit system_message\nwalked away]
-    AD --> AE[Vincent delivers\nsnarky comment\nhardcoded per language]
-    AE --> AC
+    I -->|AI max 4 rounds hit| X[Accept lowest-equity\nremaining offer\n_close_deal best]
+    X --> MC
 ```
 
 ---

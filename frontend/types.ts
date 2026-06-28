@@ -80,6 +80,7 @@ export interface Offer {
   equity: number; // percentage
   terms: string;
   isJoint: boolean;
+  revised?: boolean; // true after shark counter-counters with updated terms
 }
 
 export interface SimulationConfig {

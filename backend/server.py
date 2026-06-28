@@ -73,8 +73,8 @@ async def ws_simulate(websocket: WebSocket):
     Protocol (frontend → backend):
       {"action": "start",             "config": {...}, "apiKey": "AIza..."}
       {"action": "founder_response",  "text": "..."}        # REAL mode only
-      {"action": "accept_offer",      "offerId": "..."}
-      {"action": "counter_offer",     "text": "..."}
+      {"action": "accept_offer",      "investorId": "..."}
+      {"action": "counter_offer",     "text": "...", "investorId": "..."}
       {"action": "walk_away"}
 
     Protocol (backend → frontend):
@@ -157,15 +157,19 @@ async def ws_simulate(websocket: WebSocket):
                 if action == "founder_response":
                     await orchestrator.receive_founder_response(incoming.get("text", ""))
                 elif action in ("accept_offer", "counter_offer", "walk_away"):
-                    action_payload = {"type": action.replace("_offer", "").replace("walk_away", "walk_away")}
                     if action == "accept_offer":
-                        action_payload["type"]    = "accept"
-                        action_payload["offerId"] = incoming.get("offerId", "")
+                        action_payload = {
+                            "type":       "accept",
+                            "investorId": incoming.get("investorId", ""),
+                        }
                     elif action == "counter_offer":
-                        action_payload["type"] = "counter"
-                        action_payload["text"] = incoming.get("text", "")
+                        action_payload = {
+                            "type":       "counter",
+                            "text":       incoming.get("text", ""),
+                            "investorId": incoming.get("investorId", ""),
+                        }
                     else:
-                        action_payload["type"] = "walk_away"
+                        action_payload = {"type": "walk_away"}
                     await orchestrator.receive_bargain_action(action_payload)
         except WebSocketDisconnect:
             pass
