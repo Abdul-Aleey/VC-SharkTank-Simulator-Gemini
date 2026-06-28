@@ -5,8 +5,8 @@ steps:
       - '-t'
       - 'gcr.io/$PROJECT_ID/vc-shark-tank-backend:$COMMIT_SHA'
       - '-f'
-      - 'backend/Dockerfile'
-      - 'backend'
+      - 'Dockerfile'
+      - '.'
 
   - name: 'gcr.io/cloud-builders/docker'
     args:

@@ -152,7 +152,7 @@ export default function SimulationScreen({
             </div>
           </div>
           <span className="bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs px-2.5 py-1 rounded-full font-semibold">
-            {t.modelBadge}
+            {config.model.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ')}
           </span>
         </div>
       </div>
@@ -366,24 +366,14 @@ export default function SimulationScreen({
                       {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
                     </button>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      onClick={onAIAssist}
-                      disabled={isProcessing}
-                      className="py-3 bg-indigo-600/10 hover:bg-indigo-600/20 border border-indigo-500/20 text-indigo-400 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
-                    >
-                      <Sparkles className="w-4 h-4" />
-                      {t.aiAssistBtn}
-                    </button>
-                    <button
-                      onClick={() => onResponseSubmit()}
-                      disabled={isProcessing || !inputText.trim()}
-                      className="py-3 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
-                    >
-                      <Send className="w-4 h-4" />
-                      {t.speakBtn}
-                    </button>
-                  </div>
+                  <button
+                    onClick={() => onResponseSubmit()}
+                    disabled={isProcessing || !inputText.trim()}
+                    className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Send className="w-4 h-4" />
+                    {t.speakBtn}
+                  </button>
                 </div>
               ) : (
                 // AI autopilot status display

@@ -23,6 +23,7 @@ export type SimEvent =
   | { type: 'bargaining_start';    offers: Offer[] }
   | { type: 'report';              data: any }
   | { type: 'agent_log';           agentName: string; message: string; logType: string }
+  | { type: 'model_update';        model: string }
   | { type: 'error';               message: string }
   | { type: 'disconnected' };
 
@@ -64,7 +65,7 @@ export class SimulationWebSocket {
     };
 
     this.ws.onerror = () => {
-      this.onEvent({ type: 'error', message: 'WebSocket connection failed. Is the backend running on port 5000?' });
+      this.onEvent({ type: 'error', message: 'WebSocket connection failed. Is the backend running?' });
     };
 
     this.ws.onclose = () => {

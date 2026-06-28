@@ -303,6 +303,11 @@ export default function App() {
         break;
       }
 
+      case 'model_update': {
+        setConfig(prev => ({ ...prev, model: event.model }));
+        break;
+      }
+
       case 'bargaining_start': {
         setActiveOffers(event.offers);
         setIsProcessing(false);
@@ -354,19 +359,22 @@ export default function App() {
 
   // ── Bargaining actions (sent to backend via WebSocket) ────────────────────
   const handleAcceptOffer = (offer: Offer) => {
-    wsRef.current?.sendAcceptOffer(offer.id);
+    setActiveOffers([]);
     setIsProcessing(true);
+    wsRef.current?.sendAcceptOffer(offer.id);
   };
 
   const handleCounterOffer = (counterText: string) => {
     if (!counterText.trim()) return;
-    wsRef.current?.sendCounterOffer(counterText);
+    setActiveOffers([]);
     setIsProcessing(true);
+    wsRef.current?.sendCounterOffer(counterText);
   };
 
   const handleWalkAway = () => {
-    wsRef.current?.sendWalkAway();
+    setActiveOffers([]);
     setIsProcessing(true);
+    wsRef.current?.sendWalkAway();
   };
 
   const handleAIFounderBargainDecision = () => {
@@ -380,6 +388,8 @@ export default function App() {
     if (!responseText.trim() || isProcessing) return;
     setInputText('');
     setIsProcessing(true);
+    // Stop mic if it was running so it doesn't keep appending to the cleared field
+    if (isListening) { recognitionRef.current?.stop(); setIsListening(false); }
     wsRef.current?.sendFounderResponse(responseText);
   };
 
@@ -518,7 +528,7 @@ export default function App() {
       </main>
 
       <footer className="bg-slate-950 border-t border-white/5 py-6 text-center text-xs text-slate-500 print:hidden">
-        <p>© {new Date().getFullYear()} VC Shark Tank Simulator. Powered by Google ADK + Gemini 2.5 Flash.</p>
+        <p>© {new Date().getFullYear()} VC Shark Tank Simulator. Powered by Google ADK + {config.model.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ')}.</p>
       </footer>
 
       <ApiKeyModal

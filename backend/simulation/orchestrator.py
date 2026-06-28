@@ -54,11 +54,16 @@ class SimulationOrchestrator:
     """
 
     def __init__(self, config: dict, api_key: str = ""):
+        self.config   = config
+        self.language = config.get("language", "en")
+        self.is_ja    = self.language == "ja"
+        self.mode     = config.get("mode", "real")
+        self.rounds   = int(config.get("rounds", 3))
+        self.model    = config.get("model", "gemini-2.5-flash")
+
         # Auth: Vertex AI (Cloud Run service account) or Google AI Studio (user API key)
         _vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("true", "1", "yes")
         if _vertex:
-            # Credentials come from the Cloud Run service account via ADC.
-            # GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION must be set in the environment.
             os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
             # gemini-3.5-flash may not be on Vertex AI yet — fall back to 2.5-flash
             if self.model == "gemini-3.5-flash":
@@ -71,13 +76,6 @@ class SimulationOrchestrator:
             self._model_fallback = False
         else:
             raise ValueError("No auth: set GOOGLE_GENAI_USE_VERTEXAI=true or provide an API key")
-
-        self.config   = config
-        self.language = config.get("language", "en")
-        self.is_ja    = self.language == "ja"
-        self.mode     = config.get("mode", "real")   # "ai" | "real"
-        self.rounds   = int(config.get("rounds", 3))
-        self.model    = config.get("model", "gemini-2.5-flash")
 
         # Build ADK agents & runners (each investor gets its own session)
         self._session_svc      = build_session_service()
@@ -121,6 +119,7 @@ class SimulationOrchestrator:
     async def run(self):
         """Entry point — call once per simulation. Drive the full flow."""
         await self._init_sessions()
+        await self._emit("model_update", {"model": self.model})
         if self._model_fallback:
             await self._log(
                 "Google ADK Orchestrator",
