@@ -110,6 +110,13 @@ class SimulationOrchestrator:
         self._founder_response: asyncio.Queue  = asyncio.Queue()   # REAL mode: typed text
         self._bargain_action:   asyncio.Queue  = asyncio.Queue()   # accept/counter/walk-away
 
+        # Per-investor mutex — prevents concurrent ADK session use for the same investor.
+        # Needed when banter and next-question generation run in parallel and the banter
+        # speaker happens to be the same investor as the next asker.
+        self._investor_locks: dict[str, asyncio.Lock] = {
+            inv_id: asyncio.Lock() for inv_id in INVESTOR_IDS
+        }
+
         # Speech-done signal: backend waits here after emitting founder_response so
         # investor evaluation only starts AFTER the frontend has finished playing TTS.
         # Frontend sends {action:"speech_done"} when audio (or silent display) completes.
@@ -198,14 +205,18 @@ class SimulationOrchestrator:
                     None,
                 )
 
-                # Banter then prefetch — sequential to avoid concurrent ADK session access.
-                # Banter picks a random active investor (could be next_asker); running
-                # _generate_question(next_asker) at the same time would hit the same
-                # InMemorySession and corrupt the result.
-                await self._maybe_banter()
-
                 if next_asker:
-                    prefetched_questions[next_asker] = await self._generate_question(next_asker)
+                    # Run banter and next-question generation in parallel.
+                    # _investor_locks guarantee that if banter happens to pick next_asker
+                    # as its speaker, the two ADK calls for that session are serialised
+                    # automatically — no corruption risk.
+                    _, prefetched_q = await asyncio.gather(
+                        self._maybe_banter(),
+                        self._generate_question(next_asker),
+                    )
+                    prefetched_questions[next_asker] = prefetched_q
+                else:
+                    await self._maybe_banter()
 
                 self.investor_states[inv_id]["questionsAsked"] += 1
 
@@ -304,18 +315,18 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         await self._emit_investor_update(inv_id)
 
         history_str = self._history_str(last=10)
-        founder_name = self.config.get('founderName', 'the founder')
+        founder_first = self.config.get('founderName', 'Founder').split()[0]
         prompt = f"""GENERATE QUESTION
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Ask: {self.config.get('askAmount')} for {self.config.get('askEquity')}%
 Description: {self.config.get('description')}
-Founder's name: {founder_name}
+Founder's first name: {founder_first}
 
 Recent conversation:
 {history_str}
 
 One sharp question targeting your focus area. Max 40 words. No meta-text.
-NAMING RULE: Address the founder as "{founder_name}", never as "he", "she", "sir", "ma'am", or any pronoun.
+NAMING RULE: Address the founder as "{founder_first}", never as "he", "she", "sir", "ma'am", or any pronoun.
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
         text = await self._run_investor_agent(inv_id, prompt)
@@ -437,16 +448,16 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         state       = self.investor_states[inv_id]
         history_str = self._history_str(last=10)
 
-        founder_name = self.config.get('founderName', 'the founder')
+        founder_first = self.config.get('founderName', 'Founder').split()[0]
         prompt = f"""EVALUATE RESPONSE
 You are evaluating as {INVESTOR_PERSONAS[inv_id]['name']}.
 
-Founder ({founder_name}) said: "{founder_response}"
+Founder ({founder_first}) said: "{founder_response}"
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Ask: {self.config.get('askAmount')} for {self.config.get('askEquity')}%
 Your current confidence: {state['confidence']}%
 Round: {round_num} of {self.rounds}
-NAMING RULE: In thoughtBubble text use "{founder_name}" not "he/she/the founder".
+NAMING RULE: In thoughtBubble text use "{founder_first}" not "he/she/the founder".
 
 Conversation history:
 {history_str}
@@ -493,16 +504,16 @@ Language for text fields: {'Japanese' if self.is_ja else 'English'}"""
         )
         history_str   = self._history_str(last=6)
 
-        founder_name = self.config.get('founderName', 'the founder')
+        founder_first = self.config.get('founderName', 'Founder').split()[0]
         prompt = f"""GENERATE BANTER
 You are {INVESTOR_PERSONAS[speaker]['name']} reacting spontaneously to the pitch.
 
 CRITICAL: You may ONLY reference investors who have already spoken.
-Investors you may reference: {referenceable}
+Investors you may reference (first names only): {referenceable}
 Do NOT mention any other investor by name.
 
-NAMING RULE: Use full names — never pronouns ("he", "she", "they") for any investor.
-When referring to the founder, use "{founder_name}", not "he", "she", or "the founder".
+NAMING RULE: Use first names only — never pronouns ("he", "she", "they") for any person.
+When referring to the founder, use "{founder_first}", not "he", "she", or "the founder".
 
 Recent conversation:
 {history_str}
@@ -1099,9 +1110,10 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
     # ─── ADK agent execution helpers ─────────────────────────────────────────
 
     async def _run_investor_agent(self, inv_id: str, prompt: str) -> str:
-        runner  = self._investor_runners[inv_id]
-        session = self._investor_sessions[inv_id]
-        return await self._run_agent(runner, f"{inv_id}_user", session.id, prompt)
+        async with self._investor_locks[inv_id]:
+            runner  = self._investor_runners[inv_id]
+            session = self._investor_sessions[inv_id]
+            return await self._run_agent(runner, f"{inv_id}_user", session.id, prompt)
 
     async def _run_founder_agent(self, prompt: str) -> str:
         return await self._run_agent(

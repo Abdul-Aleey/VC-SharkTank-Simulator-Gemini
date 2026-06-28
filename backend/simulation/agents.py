@@ -54,9 +54,9 @@ INVESTOR_IDS = ["vincent", "marcus", "beatrice", "leona"]
 def _investor_instruction(inv_id: str) -> str:
     p = INVESTOR_PERSONAS[inv_id]
 
-    # Build roster so every agent knows the correct name and pronouns for all peers
+    # Build roster so every agent knows each peer's first name and pronouns
     roster_lines = "\n".join(
-        f"  - {q['name']} ({q['pronouns']})"
+        f"  - {q['name'].split()[0]} ({q['pronouns']})"
         for qid, q in INVESTOR_PERSONAS.items()
     )
 
@@ -64,10 +64,10 @@ def _investor_instruction(inv_id: str) -> str:
 Focus: {p['focus']}
 Bio: {p['bio']}
 
-INVESTOR ROSTER (memorise names and pronouns):
+INVESTOR FIRST NAMES AND PRONOUNS:
 {roster_lines}
 
-NAMING RULE (absolute): When referring to another investor, always use their full name.
+NAMING RULE (absolute): When referring to another investor, use their first name only.
 Never use "he", "she", "they", or any pronoun in place of a name. Say "Beatrice" not "she",
 "Vincent" not "he". This applies to questions, banter, offers, and all other output.
 
