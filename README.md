@@ -305,7 +305,8 @@ The simulation runs over a single WebSocket connection at `/ws-simulate`.
 |--------|---------|------|
 | `start` | `{config, apiKey}` | On connect, always first |
 | `founder_response` | `{text}` | Real mode: after each investor question |
-| `accept_offer` | `{offerId}` | Bargaining phase |
+| `speech_done` | `{}` | After founder-response TTS finishes (or immediately in Real mode); unblocks investor evaluation |
+| `accept_offer` | `{investorId}` | Bargaining phase |
 | `counter_offer` | `{text, investorId}` | Bargaining phase — routed to that specific shark's agent |
 | `walk_away` | `{}` | Bargaining phase |
 
@@ -322,9 +323,10 @@ The simulation runs over a single WebSocket connection at `/ws-simulate`.
 | `investor_update` | `investorId, confidence, trend, status, agentState, thoughtBubble, …` | Full investor state after every evaluation |
 | `founder_agent_state` | `state` | PITCHING / IDLE |
 | `system_message` | `text` | Narrative messages (round start, deal result, etc.) |
+| `phase_change` | `phase` | Simulation phase transition: `ONGOING` → `BARGAINING` → `DONE` |
 | `offer_speech` | `sender, senderName, text, offer` | Investor presents term sheet |
 | `bargaining_start` | `offers[]` | All term sheets ready, waiting for user action |
-| `report` | `data` | Final evaluation memo; signals end of simulation |
+| `report` | `data` | Final evaluation memo; only emitted after phase reaches `DONE` |
 | `agent_log` | `agentName, message, logType` | ADK orchestrator debug log |
 | `error` | `message` | Unrecoverable error |
 

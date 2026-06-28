@@ -121,7 +121,10 @@ class SimulationOrchestrator:
         # Speech-done signal: backend waits here after emitting founder_response so
         # investor evaluation only starts AFTER the frontend has finished playing TTS.
         # Frontend sends {action:"speech_done"} when audio (or silent display) completes.
-        self._speech_done_evt: asyncio.Event = asyncio.Event()
+        # Queue instead of Event: signals accumulate and are consumed in order, so a
+        # signal that arrives while the backend is processing (evaluate/banter/prefetch)
+        # is not lost — the next wait consumes it immediately instead of timing out.
+        self._speech_done_q: asyncio.Queue = asyncio.Queue()
 
         # Phase state — strictly controls when reports can be generated.
         # ONGOING → BARGAINING → DONE
@@ -245,7 +248,7 @@ class SimulationOrchestrator:
     async def receive_speech_done(self):
         """Called by the WS handler when frontend confirms TTS playback finished.
         Unblocks _wait_for_speech_done() so investor evaluation can begin."""
-        self._speech_done_evt.set()
+        await self._speech_done_q.put(True)
 
     @property
     def event_queue(self) -> asyncio.Queue:
@@ -988,9 +991,8 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         """Block until frontend signals TTS complete, with a 60 s safety timeout.
         Called after every founder_response emit so evaluation only starts once
         the investors have 'heard' the full answer."""
-        self._speech_done_evt.clear()
         try:
-            await asyncio.wait_for(self._speech_done_evt.wait(), timeout=60.0)
+            await asyncio.wait_for(self._speech_done_q.get(), timeout=60.0)
         except asyncio.TimeoutError:
             await self._log(
                 "Google ADK Orchestrator",
@@ -1130,15 +1132,30 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         async with self._investor_locks[inv_id]:
             runner  = self._investor_runners[inv_id]
             session = self._investor_sessions[inv_id]
-            return await self._run_agent(runner, f"{inv_id}_user", session.id, prompt)
+            try:
+                return await asyncio.wait_for(
+                    self._run_agent(runner, f"{inv_id}_user", session.id, prompt),
+                    timeout=45.0,
+                )
+            except asyncio.TimeoutError:
+                name = INVESTOR_PERSONAS[inv_id]["name"]
+                await self._log(name, "ADK call timed out (45 s) — skipping turn.", "warning")
+                return ""
 
     async def _run_founder_agent(self, prompt: str) -> str:
-        return await self._run_agent(
-            self._founder_runner,
-            "founder_user",
-            self._founder_session.id,
-            prompt,
-        )
+        try:
+            return await asyncio.wait_for(
+                self._run_agent(
+                    self._founder_runner,
+                    "founder_user",
+                    self._founder_session.id,
+                    prompt,
+                ),
+                timeout=45.0,
+            )
+        except asyncio.TimeoutError:
+            await self._log("Founder Agent", "ADK call timed out (45 s) — skipping turn.", "warning")
+            return ""
 
     @staticmethod
     async def _run_agent(runner, user_id: str, session_id: str, prompt: str) -> str:

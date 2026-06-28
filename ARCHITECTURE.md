@@ -105,26 +105,39 @@ ADK sessions carry conversation history and state for a single agent. If all inv
 
 ### Parallelism Strategy
 
-The orchestrator uses two layers of parallelism:
+The orchestrator uses several layers of parallelism with per-investor session locks to prevent concurrent ADK session corruption:
 
 **1. Parallel Investor Evaluation (after every founder response)**
 ```python
-tasks   = [self._evaluate_single_investor(inv_id, response) for inv_id in active]
+tasks   = [self._evaluate_single_investor(inv_id, response, round_num) for inv_id in active]
 results = await asyncio.gather(*tasks)
 ```
-All active investor agents run their evaluation prompts simultaneously. Each is an independent `runner.run_async()` call, hitting the Gemini API in parallel. This is the core multi-agent feature — 4 real ADK agent calls running concurrently.
+All active investor agents run their evaluation prompts simultaneously via `asyncio.gather`. `round_num` is passed explicitly (not derived from per-investor `questionsAsked`) so every agent sees the same correct round context regardless of ask order within the round.
 
-**2. Parallel Exit Speech Generation (when multiple investors drop out)**
+**2. Parallel Banter + Next-Question Prefetch**
+```python
+_, prefetched_q = await asyncio.gather(
+    self._maybe_banter(),
+    self._generate_question(next_asker),
+)
+```
+After evaluation, the next investor's question is generated in parallel with banter generation. `_investor_locks` (one `asyncio.Lock` per investor) serialise any case where banter randomly picks the same investor as `next_asker`, preventing concurrent session access. The prefetched question is used immediately at the start of the next exchange, eliminating a sequential ADK call from the hot path.
+
+**3. Parallel Exit Speech Generation (when multiple investors drop out)**
 ```python
 exit_tasks = [self._generate_exit_speech(inv_id) for inv_id in exit_speeches]
 exit_texts = await asyncio.gather(*exit_tasks)
 ```
-When multiple investors hit the confidence threshold simultaneously, their exit speeches are generated in parallel, then emitted to the frontend sequentially (the frontend speech queue handles the serialisation).
+When multiple investors hit the confidence threshold simultaneously, their exit speeches are generated in parallel, then emitted to the frontend sequentially.
 
 **Sequential operations (intentional):**
-- Questions: each investor asks one at a time (gives the founder breathing room and prevents question overlap in chat)
+- Questions: each investor asks one at a time (structured turn-taking)
 - Founder responses: one at a time (single speaker)
+- Evaluate → banter+prefetch: evaluate must complete before banter starts so exit decisions are known before picking banter speaker
 - Report feedback: collected in parallel (`asyncio.gather`) but merged into a single report object
+
+**Session safety:**
+Every `_run_investor_agent` call acquires `_investor_locks[inv_id]` before using that investor's `Runner` and `InMemorySession`. This prevents `asyncio.gather` from sending two concurrent prompts to the same session, which would corrupt session history. All ADK calls also have a 45 s `asyncio.wait_for` timeout so a hung Gemini API call surfaces as a warning log rather than a silent freeze.
 
 ---
 
@@ -164,17 +177,22 @@ run()
   ├─ for round in 1..N:
   │   ├─ active = [investors with status==ACTIVE]
   │   ├─ random.shuffle(active)    # randomise question order each round
+  │   ├─ prefetched_questions = {}
   │   │
-  │   └─ for inv_id in active:
-  │       ├─ _generate_question(inv_id)          → emit("question")
-  │       ├─ wait for founder response            (AI: _generate_founder_response | REAL: queue.get())
+  │   └─ for idx, inv_id in enumerate(active):
+  │       ├─ use prefetched_questions[inv_id] OR _generate_question(inv_id)
+  │       │     (question history injected into prompt to prevent repetition)
+  │       ├─ emit("question")
+  │       ├─ wait for founder response   (AI: _generate_founder_response | REAL: queue.get())
   │       ├─ emit("founder_response")
-  │       ├─ _parallel_evaluate(response)        → all active agents evaluate concurrently
-  │       │   ├─ asyncio.gather(*[_evaluate_single_investor()])
+  │       ├─ _wait_for_speech_done()             # blocks until frontend signals TTS complete
+  │       ├─ _parallel_evaluate(response, round_num)   → all active agents evaluate concurrently
+  │       │   ├─ asyncio.gather(*[_evaluate_single_investor(inv, response, round_num)])
   │       │   ├─ update confidence, trend, thoughtBubble, strengths, weaknesses, risks
   │       │   ├─ check OUT threshold (≤25) → _generate_exit_speech() in parallel
   │       │   └─ emit investor_update for all
-  │       └─ _maybe_banter()                     → 25% chance of spontaneous comment
+  │       └─ asyncio.gather(_maybe_banter(), _generate_question(next_asker))
+  │             # prefetch next question in parallel with banter (session-locked)
   │
   └─ _phase_bargaining()
       ├─ _build_offers(qualifying investors)
@@ -200,6 +218,28 @@ Critically, **INVEST status is never set during Q&A rounds**. Investors whose co
 The confidence value is set entirely by the investor's own ADK agent — the orchestrator asks each agent to return a JSON object including a `confidence` integer. The agent decides how convincing the founder's answer was relative to their focus area.
 
 `trend` is derived locally: `new_confidence - old_confidence`. A positive trend (green arrow) means the investor liked the last answer; negative means it hurt.
+
+### Speech-Done Synchronisation
+
+After the backend emits `founder_response`, it blocks on `_wait_for_speech_done()` before running investor evaluation. The frontend sends `{action: "speech_done"}` after TTS finishes (AI mode) or immediately after displaying the text (Real mode, no TTS). This ensures all investor agents evaluate only after they have "heard" the full answer.
+
+`_speech_done_q` is an `asyncio.Queue` (not an Event). Signals are enqueued and consumed in order — so a `speech_done` that arrives while the backend is processing evaluate/banter/prefetch is never lost. A 60 s timeout prevents permanent block if the frontend disconnects mid-simulation.
+
+### Simulation Phase State Machine
+
+The backend tracks `_sim_phase` (`ONGOING` → `BARGAINING` → `DONE`) and emits `phase_change` events at each transition:
+
+| Phase | When set | Effect |
+|-------|----------|--------|
+| `ONGOING` | Simulation start | Report generation blocked |
+| `BARGAINING` | After all Q&A rounds complete | Offer phase begins |
+| `DONE` | At start of `_generate_report()` | Report emitted to frontend |
+
+The frontend stores the phase in `simPhaseRef` and ignores any `report` event that arrives before `DONE`, preventing a premature end-of-simulation screen.
+
+### Question Deduplication
+
+Each investor tracks all questions it has previously asked in `investor_states[inv_id]["questionsHistory"]`. The full list is injected into every subsequent `GENERATE QUESTION` prompt with an explicit instruction to ask about a completely different angle. This prevents repetitive questioning in long simulations (8–10 rounds).
 
 ### Banter Guard
 
