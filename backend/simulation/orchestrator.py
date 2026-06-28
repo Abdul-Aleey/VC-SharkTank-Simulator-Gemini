@@ -110,6 +110,15 @@ class SimulationOrchestrator:
         self._founder_response: asyncio.Queue  = asyncio.Queue()   # REAL mode: typed text
         self._bargain_action:   asyncio.Queue  = asyncio.Queue()   # accept/counter/walk-away
 
+        # Speech-done signal: backend waits here after emitting founder_response so
+        # investor evaluation only starts AFTER the frontend has finished playing TTS.
+        # Frontend sends {action:"speech_done"} when audio (or silent display) completes.
+        self._speech_done_evt: asyncio.Event = asyncio.Event()
+
+        # Phase state — strictly controls when reports can be generated.
+        # ONGOING → BARGAINING → DONE
+        self._sim_phase: str = "ONGOING"
+
         # ADK sessions — created lazily in run()
         self._investor_sessions: dict = {}
         self._founder_session = None
@@ -166,6 +175,11 @@ class SimulationOrchestrator:
                     "text":       response,
                 })
 
+                # Wait for the frontend to confirm TTS playback is complete.
+                # This ensures all investor agents evaluate AFTER the answer is spoken,
+                # not while it is still playing. Frontend sends {action:"speech_done"}.
+                await self._wait_for_speech_done()
+
                 # All active investors evaluate in parallel
                 await self._parallel_evaluate(response)
 
@@ -174,13 +188,16 @@ class SimulationOrchestrator:
 
                 self.investor_states[inv_id]["questionsAsked"] += 1
 
-        # All rounds complete — announce before moving to offers
+        # All rounds complete — transition to BARGAINING phase
         rounds_done_text = (
             f"全{self.rounds}ラウンドのピッチが終了しました。オファーフェーズに移行します。"
             if self.is_ja else
             f"All {self.rounds} pitch rounds complete. Moving to the offer phase."
         )
         await self._emit("system_message", {"text": rounds_done_text})
+
+        self._sim_phase = "BARGAINING"
+        await self._emit("phase_change", {"phase": "BARGAINING"})
 
         await self._phase_bargaining()
 
@@ -191,6 +208,11 @@ class SimulationOrchestrator:
     async def receive_bargain_action(self, action: dict):
         """Called by the WS handler when the user accepts / counters / walks away."""
         await self._bargain_action.put(action)
+
+    async def receive_speech_done(self):
+        """Called by the WS handler when frontend confirms TTS playback finished.
+        Unblocks _wait_for_speech_done() so investor evaluation can begin."""
+        self._speech_done_evt.set()
 
     @property
     def event_queue(self) -> asyncio.Queue:
@@ -900,7 +922,33 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
 
     # ─── Report generation ────────────────────────────────────────────────────
 
+    async def _wait_for_speech_done(self):
+        """Block until frontend signals TTS complete, with a 60 s safety timeout.
+        Called after every founder_response emit so evaluation only starts once
+        the investors have 'heard' the full answer."""
+        self._speech_done_evt.clear()
+        try:
+            await asyncio.wait_for(self._speech_done_evt.wait(), timeout=60.0)
+        except asyncio.TimeoutError:
+            await self._log(
+                "Google ADK Orchestrator",
+                "speech_done timeout (60 s) — proceeding with evaluation.",
+                "warning",
+            )
+
     async def _generate_report(self, deal: dict | None):
+        # Guard: only generate a report once the simulation is truly finished.
+        if self._sim_phase == "ONGOING":
+            await self._log(
+                "Google ADK Orchestrator",
+                "Report generation blocked — simulation still ONGOING.",
+                "warning",
+            )
+            return
+
+        self._sim_phase = "DONE"
+        await self._emit("phase_change", {"phase": "DONE"})
+
         await self._log(
             "Google ADK Orchestrator",
             "Generating final evaluation report — querying all 4 investor agents...",

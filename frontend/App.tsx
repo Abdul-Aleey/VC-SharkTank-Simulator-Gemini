@@ -65,6 +65,7 @@ export default function App() {
   const chatEndRef      = useRef<HTMLDivElement>(null);
   const wsRef           = useRef<SimulationWebSocket | null>(null);
   const simModeRef      = useRef<SimMode>(config.mode);
+  const simPhaseRef     = useRef<string>('ONGOING');  // "ONGOING" | "BARGAINING" | "DONE"
 
   const t = TRANSLATIONS[config.language];
 
@@ -250,12 +251,24 @@ export default function App() {
         const msg = { id: Math.random().toString(), sender: event.sender as any,
                       senderName: event.senderName, text: event.text, timestamp: Date.now() };
         if (simModeRef.current === SimMode.REAL) {
-          // In REAL mode the user already said this — show text in chat but don't speak it
+          // REAL mode: user already said this — show text silently, then signal backend
+          // immediately (no TTS to wait for) so investor evaluation can begin.
           speechQueueRef.current = speechQueueRef.current.then(() => {
             setChat(prev => [...prev, msg]);
+            wsRef.current?.sendSpeechDone();
           });
         } else {
-          queueMessage(msg, event.sender as any);
+          // AI mode: play TTS, signal backend AFTER audio finishes so investors
+          // only start evaluating once the answer has been fully spoken.
+          speechQueueRef.current = speechQueueRef.current.then(() =>
+            new Promise<void>(resolve => {
+              setChat(prev => [...prev, msg]);
+              speakText(msg.text, event.sender as any).then(() => {
+                wsRef.current?.sendSpeechDone();
+                resolve();
+              });
+            })
+          );
         }
         break;
       }
@@ -333,6 +346,11 @@ export default function App() {
         break;
       }
 
+      case 'phase_change': {
+        simPhaseRef.current = event.phase;
+        break;
+      }
+
       case 'bargaining_start': {
         // Queue so offer panel appears only after all offer speeches have been spoken
         const offers = event.offers;
@@ -344,6 +362,8 @@ export default function App() {
       }
 
       case 'report': {
+        // Hard guard: never render a report while simulation is still active
+        if (simPhaseRef.current !== 'DONE') break;
         setReport(event.data as ReportData);
         setStep('REPORT');
         setIsProcessing(false);
@@ -380,8 +400,9 @@ export default function App() {
 
     addAgentLog('Google ADK Orchestrator', 'Initializing 5-agent multi-agent system...', 'info');
 
-    // Snapshot the mode so the event handler (a stale closure) can read it
-    simModeRef.current = config.mode;
+    // Snapshot refs so the event handler (stale closure) can read current values
+    simModeRef.current  = config.mode;
+    simPhaseRef.current = 'ONGOING';
 
     // Connect to the ADK backend
     const ws = new SimulationWebSocket(handleSimEvent);

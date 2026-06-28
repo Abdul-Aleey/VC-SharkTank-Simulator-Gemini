@@ -24,6 +24,7 @@ export type SimEvent =
   | { type: 'report';              data: any }
   | { type: 'agent_log';           agentName: string; message: string; logType: string }
   | { type: 'model_update';        model: string }
+  | { type: 'phase_change';        phase: string }   // "ONGOING" | "BARGAINING" | "DONE"
   | { type: 'error';               message: string }
   | { type: 'disconnected' };
 
@@ -75,6 +76,10 @@ export class SimulationWebSocket {
 
   sendFounderResponse(text: string): void {
     this._send({ action: 'founder_response', text });
+  }
+
+  sendSpeechDone(): void {
+    this._send({ action: 'speech_done' });
   }
 
   sendAcceptOffer(investorId: string): void {

@@ -154,7 +154,9 @@ async def ws_simulate(websocket: WebSocket):
                     continue
 
                 action = incoming.get("action")
-                if action == "founder_response":
+                if action == "speech_done":
+                    await orchestrator.receive_speech_done()
+                elif action == "founder_response":
                     await orchestrator.receive_founder_response(incoming.get("text", ""))
                 elif action in ("accept_offer", "counter_offer", "walk_away"):
                     if action == "accept_offer":
