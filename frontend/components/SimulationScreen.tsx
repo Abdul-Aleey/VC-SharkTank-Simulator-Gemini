@@ -361,34 +361,37 @@ export default function SimulationScreen({
             <div className="space-y-4 flex-1 flex flex-col justify-end">
               {config.mode === SimMode.REAL ? (
                 <div className="space-y-3">
-                  <div className="relative">
-                    <textarea
-                      rows={3}
-                      value={inputText}
-                      onChange={(e) => onInputChange(e.target.value)}
-                      placeholder={t.typePlaceholder}
-                      disabled={isProcessing}
-                      className="w-full bg-slate-800/50 border border-white/10 rounded-xl pl-4 pr-12 py-3 text-sm focus:outline-none focus:border-indigo-500 resize-none disabled:opacity-50"
-                    />
+                  <textarea
+                    rows={3}
+                    value={inputText}
+                    onChange={(e) => onInputChange(e.target.value)}
+                    placeholder={isListening ? 'Listening… speak clearly' : t.typePlaceholder}
+                    disabled={isProcessing}
+                    className="w-full bg-slate-800/50 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500 resize-none disabled:opacity-50"
+                  />
+                  {/* Speak + Send two-button row */}
+                  <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={onToggleListening}
-                      className={`absolute right-3 bottom-4 p-2 rounded-lg transition-all ${
+                      disabled={isProcessing}
+                      className={`py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 disabled:opacity-50 ${
                         isListening
                           ? 'bg-red-500 text-white animate-pulse'
-                          : 'bg-slate-700 text-slate-300 hover:text-white'
+                          : 'bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white'
                       }`}
                     >
                       {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                      {isListening ? 'Listening…' : 'Speak'}
+                    </button>
+                    <button
+                      onClick={() => onResponseSubmit()}
+                      disabled={isProcessing || !inputText.trim()}
+                      className="py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    >
+                      <Send className="w-4 h-4" />
+                      Send
                     </button>
                   </div>
-                  <button
-                    onClick={() => onResponseSubmit()}
-                    disabled={isProcessing || !inputText.trim()}
-                    className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
-                  >
-                    <Send className="w-4 h-4" />
-                    {t.speakBtn}
-                  </button>
                 </div>
               ) : (
                 // AI autopilot status display
@@ -435,8 +438,8 @@ export default function SimulationScreen({
         const profile = INVESTOR_PROFILES[notesModal];
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-            <div className="bg-slate-900 border border-white/10 rounded-2xl p-6 max-w-lg w-full space-y-4 shadow-2xl">
-              <div className="flex justify-between items-center">
+            <div className="bg-slate-900 border border-white/10 rounded-2xl p-6 max-w-lg w-full shadow-2xl flex flex-col max-h-[90vh]">
+              <div className="flex justify-between items-center flex-shrink-0">
                 <div className="flex items-center gap-2">
                   <span className="text-2xl">{profile.emoji}</span>
                   <h3 className="text-lg font-bold text-white">{profile.name} — {t.analyzeNotes}</h3>
@@ -446,7 +449,7 @@ export default function SimulationScreen({
                 </button>
               </div>
 
-              <div className="space-y-3">
+              <div className="space-y-3 overflow-y-auto flex-1 mt-4 pr-1">
                 <div>
                   <h4 className="text-xs font-semibold text-emerald-400 uppercase tracking-wider mb-2">{t.strengths}</h4>
                   {inv.strengths.length > 0
@@ -469,7 +472,7 @@ export default function SimulationScreen({
 
               <button
                 onClick={() => setNotesModal(null)}
-                className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl transition-all"
+                className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl transition-all mt-4 flex-shrink-0"
               >
                 {t.close}
               </button>

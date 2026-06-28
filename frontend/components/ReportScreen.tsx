@@ -61,21 +61,28 @@ export default function ReportScreen({ report, config, investors, onRestart, onD
               {t.agreedTermSheet}
             </h4>
             {report.agreedTermSheet ? (
-              <div className="bg-emerald-500/5 border border-emerald-500/10 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4 print:border-slate-300">
-                <div>
-                  <span className="text-xs text-emerald-400 font-bold block print:text-emerald-700">DEAL SEALED</span>
-                  <span className="font-bold text-slate-200 print:text-slate-900">
-                    {report.agreedTermSheet.investors.map(id => INVESTOR_PROFILES[id as InvestorId]?.name ?? id).join(' & ')}
-                  </span>
+              <div className="bg-emerald-500/5 border border-emerald-500/10 rounded-xl p-4 space-y-3 print:border-slate-300">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <span className="text-xs text-emerald-400 font-bold block print:text-emerald-700">DEAL SEALED</span>
+                    <span className="font-bold text-slate-200 print:text-slate-900">
+                      {report.agreedTermSheet.investors.map((id: string) => INVESTOR_PROFILES[id as InvestorId]?.name ?? id).join(' & ')}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-lg font-extrabold text-emerald-400 block print:text-emerald-700">
+                      {report.agreedTermSheet.cash}
+                    </span>
+                    <span className="text-xs text-slate-400 print:text-slate-600">
+                      for {report.agreedTermSheet.equity}% Equity
+                    </span>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <span className="text-lg font-extrabold text-emerald-400 block print:text-emerald-700">
-                    {report.agreedTermSheet.cash}
-                  </span>
-                  <span className="text-xs text-slate-400 print:text-slate-600">
-                    for {report.agreedTermSheet.equity}% Equity
-                  </span>
-                </div>
+                {report.agreedTermSheet.terms && (
+                  <div className="bg-slate-900/60 rounded-lg px-3 py-2 text-xs text-slate-300 leading-relaxed border border-white/5 print:bg-slate-100 print:text-slate-800 print:border-slate-200">
+                    {report.agreedTermSheet.terms}
+                  </div>
+                )}
               </div>
             ) : (
               <div className="bg-red-500/5 border border-red-500/10 rounded-xl p-4 text-center print:border-slate-300">

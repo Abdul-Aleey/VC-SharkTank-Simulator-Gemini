@@ -185,7 +185,7 @@ run()
   │       ├─ emit("question")
   │       ├─ wait for founder response   (AI: _generate_founder_response | REAL: queue.get())
   │       ├─ emit("founder_response")
-  │       ├─ _wait_for_speech_done()             # blocks until frontend signals TTS complete
+  │       ├─ _wait_for_speech_done()             # blocks until frontend TTS complete (omitted on LAST exchange so bargaining starts immediately)
   │       ├─ _parallel_evaluate(response, round_num)   → all active agents evaluate concurrently
   │       │   ├─ asyncio.gather(*[_evaluate_single_investor(inv, response, round_num)])
   │       │   ├─ update confidence, trend, thoughtBubble, strengths, weaknesses, risks
@@ -243,7 +243,10 @@ Each investor tracks all questions it has previously asked in `investor_states[i
 
 ### Banter Guard
 
-Banter (spontaneous investor comments) has a 25% trigger probability per exchange. A critical constraint prevents agents from hallucinating references to investors who haven't spoken yet:
+Banter (spontaneous investor comments) has a 25% trigger probability per exchange. Two constraints apply:
+
+1. **Speaker guard** — prevents agents from hallucinating references to investors who haven't spoken yet
+2. **No-question rule** — banter is always a comment, reaction, joke, or observation; never a question. The prompt includes: "Do NOT ask a question. No '?' marks. This is a side comment, never an inquiry."
 
 ```python
 already_spoke = {
@@ -279,35 +282,26 @@ The speech is grounded in `chat_history`, so every departure is unique to what w
 
 After all rounds complete, `_phase_bargaining()` determines qualifying investors (confidence > 25, not OUT), sets their `status = INVEST`, emits investor updates, then announces which investors are making offers.
 
-The bargaining phase runs as a **negotiation loop** — multi-round back-and-forth, fully personality-driven, no hardcoded outcomes:
+**Offer term generation** — `_build_offers()` is async. For each qualifying investor, `_generate_single_offer_terms()` calls that investor's own ADK agent and asks it to propose deal terms. The agent decides equity %, royalty as a percentage on net sales, recoupment as a multiple of the investment (any multiple it chooses), interest rate, milestone conditions, board seat, or any other structure it considers appropriate for the risk. No multipliers or percentages are hardcoded anywhere in this path. Equity is safety-clamped to 1–49% in case of a model hallucination.
 
-**AI mode**: `_ai_founder_decide_action()` feeds the FounderAgent all current offers, and the agent decides: accept the best offer, counter a specific shark, or walk away. The agent speaks its reasoning to the room first. The backend runs the entire loop autonomously (max 4 rounds). The offer panel shows read-only with an "AI Founder is negotiating…" indicator.
+**Offer speech** — `_generate_offer_speech()` then gives the same investor its own terms and asks it to present them in its own voice. The card for that investor appears on the frontend only after the TTS for that speech finishes (via `onAfter` callback in the speech queue).
 
-**REAL mode**: Offer cards show Accept / Counter / Walk Away buttons per shark. The backend waits for each user action. Counter opens a modal showing the specific shark's name.
+The bargaining phase runs as a negotiation loop, fully personality-driven, no hardcoded outcomes:
 
-**Counter-counter flow**: `_evaluate_counter_offer()` asks the targeted shark's ADK agent to respond in character. Three possible outcomes:
-- `{accepted: true}` → deal closes immediately
-- `{counter_offer: {cash, equity, terms}}` → shark revised their terms; `bargaining_start` is re-emitted with updated offer, loop continues
-- `{accepted: false, counter_offer: null}` → hard reject; offer removed from table
+**AI mode**: `_ai_founder_decide_action()` feeds the FounderAgent all current offers, and the agent decides: accept the best offer, counter a specific shark, or walk away. The agent speaks its reasoning to the room first. The backend runs the entire loop autonomously (max 4 rounds).
 
-If all offers are rejected/withdrawn, negotiation breaks down and the report generates with no deal.
+**REAL mode**: Offer cards show Accept / Counter / Walk Away buttons per shark. Counter opens a modal for that specific shark.
 
-**Acceptance**: `_close_deal()` calls `_generate_acceptance_speech()` — the FounderAgent names the specific shark(s) explicitly before the deal confirmation system message.
+**Counter-counter flow**: `_evaluate_counter_offer()` sends the founder's counter to the targeted shark's ADK agent. Three outcomes:
+- `{accepted: true}` — deal closes immediately
+- `{counter_offer: {cash, equity, terms}}` — shark revises; `bargaining_start` is re-emitted with `isRevision: true`, frontend replaces the card immediately
+- `{accepted: false, counter_offer: null}` — hard reject; offer removed from table, `bargaining_start` re-emitted with `isRevision: true` showing remaining offers
 
-**Individual offers** are calculated from each qualifier's final confidence:
+`isRevision: false` on the initial `bargaining_start` tells the frontend to leave card reveal to the `offer_speech` `onAfter` callbacks. `isRevision: true` on subsequent emits tells the frontend to replace `activeOffers` immediately.
 
-| Confidence | Terms |
-|-----------|-------|
-| ≥ 85 | Exact terms requested |
-| 70–84 | Ask amount at 1.2× equity + royalty |
-| 26–69 | Ask amount at 2.5× equity (capped at 49%) |
+If all offers are rejected or withdrawn, negotiation breaks down and the report generates with no deal.
 
-**Joint offers** (30% chance): two investors with confidence between 75–90 can combine into a single joint offer.
-
-After the frontend sends an action:
-- **accept**: report generated with the accepted term sheet
-- **counter**: founder's counter text is added to history; 50% chance investors accept it
-- **walk_away**: Vincent delivers a snarky sendoff, then report generated with `deal=null`
+**Acceptance**: `_close_deal()` generates an acceptance speech, emits it as `founder_response`, then calls `_generate_report(deal=offer)`. The full accepted offer (equity, terms, investors) is saved in `report.agreedTermSheet` and displayed in the final memo.
 
 ### Report Generation
 
@@ -335,9 +329,9 @@ App (root state + WebSocket)
 │   ├── InvestorCard × 4 (confidence bar, agent state, thought bubble)
 │   ├── Chat window (message list with per-speaker avatars)
 │   ├── Input dock
-│   │   ├── [REAL mode] textarea + mic button + Submit button
+│   │   ├── [REAL mode] textarea + Speak button (continuous mic) + Send button
 │   │   └── [AI mode] "AI Autopilot Active" status display
-│   ├── Bargaining panel (offer cards, counter-offer modal)
+│   ├── Bargaining panel (offer cards revealed one-by-one after each TTS, counter-offer modal)
 │   └── ADK System Logs panel
 └── ReportScreen (score, verdict, per-shark feedback, roadmap, download)
 ```
@@ -364,7 +358,9 @@ This is the most important frontend design decision. Naively calling `window.spe
 
 **Investor confidence updates** are also routed through the queue. When evaluation results arrive, confidence meters only update after the associated dialogue has been spoken — so the user hears the question and answer before seeing the meter change. The exception is the "thinking" state (isThinking=true): thinking spinners appear immediately when evaluation starts, so the user can see investors are evaluating while the dialogue speech plays.
 
-**Offer panel** (`bargaining_start`) is also queued — the offer cards only appear after all shark offer speeches have been spoken, not while they're still being read out.
+**Offer cards** appear one-by-one in sync with each shark's spoken offer. Each `offer_speech` event is queued with an `onAfter` callback — when that shark's TTS finishes, their offer card is added to `activeOffers`. This creates the live "card-reveal as speech ends" effect rather than all cards appearing at once.
+
+**Final report** is also queued behind all TTS — when the backend sends `report`, the frontend chains `setStep('REPORT')` onto the tail of `speechQueueRef.current`. The report screen only appears after the founder's acceptance speech and all offer speeches have fully played out.
 
 The fix is a **serialised Promise chain**:
 
@@ -397,10 +393,18 @@ Every incoming WebSocket event chains onto the tail of `speechQueueRef.current`.
   → text appears in chat
   → speech plays
   → speech ends → setIsProcessing(false)   ← input unlocks HERE
-  
-[user types / dictates and clicks Submit]
+
+[user clicks "Speak"]
+  → startListening()
+  → SpeechRecognition starts (continuous=true, interimResults=false)
+  → each final transcript appended to inputText state
+  → onend auto-restarts recognition while isListeningRef.current is true
+  → clicking "Speak" again toggles mic OFF (without submitting)
+
+[user clicks "Send"]
   → handleResponseSubmit()
-  → stop mic if listening
+  → isListeningRef.current = false (stops mic auto-restart)
+  → recognitionRef.current?.stop()
   → setIsProcessing(true)   ← input locks again
   → ws.sendFounderResponse(text)
   
@@ -494,7 +498,8 @@ Frontend                    Backend (server.py)         Orchestrator          AD
    │                               │                         │                    │
    │  ─ ─ ─ ─ BARGAINING ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │                    │
    │◄── {type:"offer_speech"} ─────│◄────────────────────────│                    │
-   │◄── {type:"bargaining_start"} ─│◄────────────────────────│                    │
+   │◄── {type:"bargaining_start",  │◄────────────────────────│                    │
+   │     isRevision:false} ─────────│                         │                    │
    │                               │                         │                    │
    │──── {action:"accept_offer"} ──►│                        │                    │
    │                               │── receive_bargain_action() ────────────────►│

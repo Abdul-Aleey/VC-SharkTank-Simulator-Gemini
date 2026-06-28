@@ -62,6 +62,7 @@ export default function App() {
   const speechTokenRef  = useRef<number>(0);
   const speechQueueRef  = useRef<Promise<void>>(Promise.resolve());
   const recognitionRef  = useRef<any>(null);
+  const isListeningRef  = useRef<boolean>(false);
   const chatEndRef      = useRef<HTMLDivElement>(null);
   const wsRef           = useRef<SimulationWebSocket | null>(null);
   const simModeRef      = useRef<SimMode>(config.mode);
@@ -214,21 +215,54 @@ export default function App() {
     });
   }, [t.systemAlert]);
 
-  // ── Speech recognition ────────────────────────────────────────────────────
-  const toggleListening = () => {
+  // ── Speech recognition — Speak / Send two-button system ──────────────────
+  // "Speak" starts the mic and keeps it active (restarts on natural pause).
+  // "Send" stops the mic and submits whatever was captured.
+  const startListening = useCallback(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) return;
-    if (isListening) { recognitionRef.current?.stop(); setIsListening(false); return; }
+
+    // Toggle OFF: stop mic (without sending) — user can review transcript before clicking Send
+    if (isListeningRef.current) {
+      isListeningRef.current = false;
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+
     const recognition = new SpeechRecognition();
-    recognition.lang = config.language === Language.JA ? 'ja-JP' : 'en-US';
-    recognition.interimResults = false;
-    recognition.onresult = (e: any) => { const t = e.results[0][0].transcript; setInputText(prev => prev ? `${prev} ${t}` : t); };
-    recognition.onend  = () => setIsListening(false);
-    recognition.onerror = () => setIsListening(false);
-    recognitionRef.current = recognition;
-    recognition.start();
+    recognition.lang            = config.language === Language.JA ? 'ja-JP' : 'en-US';
+    recognition.interimResults  = false;
+    recognition.continuous      = true;
+
+    recognition.onresult = (e: any) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          const transcript = e.results[i][0].transcript;
+          setInputText(prev => prev ? `${prev} ${transcript}` : transcript);
+        }
+      }
+    };
+
+    recognition.onend = () => {
+      // Restart automatically while isListeningRef is still true (keep mic alive).
+      if (isListeningRef.current) {
+        try { recognition.start(); } catch { /* ignore if already started */ }
+      } else {
+        setIsListening(false);
+      }
+    };
+
+    recognition.onerror = () => {
+      isListeningRef.current = false;
+      setIsListening(false);
+    };
+
+    recognitionRef.current  = recognition;
+    isListeningRef.current  = true;
     setIsListening(true);
-  };
+    recognition.start();
+  }, [config.language]);
 
   // ── WebSocket event handler (the new "orchestrator" on the frontend) ──────
   const handleSimEvent = useCallback((event: SimEvent) => {
@@ -237,12 +271,27 @@ export default function App() {
       // Spoken messages: text appears and audio plays together, one at a time.
       case 'pitch':
       case 'banter':
-      case 'exit_speech':
-      case 'offer_speech': {
+      case 'exit_speech': {
         queueMessage(
           { id: Math.random().toString(), sender: event.sender as any,
             senderName: event.senderName, text: event.text, timestamp: Date.now() },
           event.sender as any,
+        );
+        break;
+      }
+
+      // offer_speech: add the offer card to the panel AFTER this investor's TTS finishes,
+      // so cards reveal one-by-one in sync with each shark's spoken offer.
+      case 'offer_speech': {
+        const offerMsg = { id: Math.random().toString(), sender: event.sender as any,
+                           senderName: event.senderName, text: event.text, timestamp: Date.now() };
+        const offerData = event.offer;
+        queueMessage(
+          offerMsg,
+          event.sender as any,
+          offerData ? () => setActiveOffers(prev =>
+            prev.some(o => o.id === offerData.id) ? prev : [...prev, offerData]
+          ) : undefined,
         );
         break;
       }
@@ -352,9 +401,12 @@ export default function App() {
       }
 
       case 'bargaining_start': {
-        // Show panel immediately — offer speeches continue playing in the background.
-        // Queuing behind TTS caused an apparent 45-60 s freeze after all rounds ended.
-        setActiveOffers(event.offers);
+        if (event.isRevision) {
+          // Revision or withdrawal during negotiation loop — replace cards immediately
+          // so the panel shows the updated/remaining offers straight away.
+          setActiveOffers(event.offers);
+        }
+        // Initial bargaining_start: cards already revealed one-by-one via offer_speech onAfter.
         setIsProcessing(false);
         break;
       }
@@ -362,10 +414,15 @@ export default function App() {
       case 'report': {
         // Hard guard: never render a report while simulation is still active
         if (simPhaseRef.current !== 'DONE') break;
-        setReport(event.data as ReportData);
-        setStep('REPORT');
-        setIsProcessing(false);
-        wsRef.current?.disconnect();
+        // Queue report screen behind the speech queue so it only appears after
+        // all offer speeches and the founder's acceptance speech finish playing.
+        const reportData = event.data as ReportData;
+        speechQueueRef.current = speechQueueRef.current.then(() => {
+          setReport(reportData);
+          setStep('REPORT');
+          setIsProcessing(false);
+          wsRef.current?.disconnect();
+        });
         break;
       }
 
@@ -428,13 +485,14 @@ export default function App() {
     wsRef.current?.sendWalkAway();
   };
 
-  // ── REAL mode: founder submits a typed response ───────────────────────────
+  // ── REAL mode: founder submits a typed/spoken response ───────────────────
   const handleResponseSubmit = (text?: string) => {
     const responseText = text || inputText;
     if (!responseText.trim() || isProcessing) return;
     setInputText('');
     setIsProcessing(true);
-    // Stop mic if it was running so it doesn't keep appending to the cleared field
+    // Stop mic so it doesn't keep appending after the field is cleared
+    isListeningRef.current = false;
     if (isListening) { recognitionRef.current?.stop(); setIsListening(false); }
     wsRef.current?.sendFounderResponse(responseText);
   };
@@ -548,7 +606,7 @@ export default function App() {
             onInputChange={setInputText}
             onToggleMute={() => setIsMuted(v => !v)}
             onToggleAutoplay={() => setIsAutoplay(v => !v)}
-            onToggleListening={toggleListening}
+            onToggleListening={startListening}
             onResponseSubmit={handleResponseSubmit}
             onAIAssist={handleAIAssist}
             onAcceptOffer={handleAcceptOffer}

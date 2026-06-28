@@ -20,7 +20,7 @@ export type SimEvent =
        risks: string[]; agentState: string; isThinking: boolean }
   | { type: 'founder_agent_state'; state: string }
   | { type: 'system_message';      text: string }
-  | { type: 'bargaining_start';    offers: Offer[] }
+  | { type: 'bargaining_start';    offers: Offer[]; isRevision: boolean }
   | { type: 'report';              data: any }
   | { type: 'agent_log';           agentName: string; message: string; logType: string }
   | { type: 'model_update';        model: string }

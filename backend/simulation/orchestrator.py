@@ -217,11 +217,11 @@ class SimulationOrchestrator:
                         )
                         early_q = results[1] if isinstance(results[1], str) else None
                     else:
-                        await asyncio.gather(
-                            self._wait_for_speech_done(),
-                            self._parallel_evaluate(response, round_num),
-                            return_exceptions=True,
-                        )
+                        # No next asker: evaluate only — do NOT block on speech_done.
+                        # Bargaining starts as soon as evaluate finishes; the offer
+                        # panel appears immediately while the last TTS is still playing
+                        # (bargaining_start is handled immediately by the frontend).
+                        await self._parallel_evaluate(response, round_num)
 
                 else:
                     # REAL mode: generate next question while user reads and types (~30-60 s).
@@ -404,7 +404,7 @@ Ask ONE expert-level question that:
 - Uses your deep expertise in {focus} to expose something most investors would miss
 - Cannot be answered with vague platitudes
 - Is under 40 words, direct, conversational — no preamble or meta-text
-Address the founder as "{founder_first}".
+- Use the founder's name only when it flows naturally — not forced into every sentence
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
         text = await self._run_investor_agent(inv_id, prompt)
@@ -433,7 +433,10 @@ Question from {INVESTOR_PERSONAS[questioner_id]['name']}: "{question}"
 Conversation so far:
 {history_str}
 
-Reply in character matching your personality. Under 60 words. No meta-text.
+Answer as a real founder under pressure — direct, confident, specific about facts and numbers.
+Do not open with compliments about the question (no "Great question", "Excellent question", etc.) — go straight to the answer.
+Use the investor's name only if it sounds natural, not in every sentence.
+Under 60 words. No meta-text.
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
         text = await self._run_founder_agent(prompt)
@@ -608,7 +611,9 @@ When referring to the founder, use "{founder_first}", not "he", "she", or "the f
 Recent conversation:
 {history_str}
 
-One punchy comment (under 25 words). No quotes, no meta-text.
+One punchy reaction (under 25 words) — a comment, observation, witty remark, or friendly dig.
+RULE: Do NOT ask a question. No "?" marks. This is a side comment, never an inquiry.
+No quotes, no meta-text.
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
         await self._log(
@@ -666,29 +671,22 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             )
         })
 
-        # Build mutable offers dict keyed by lead investor id
-        offers_list   = self._build_offers(qualifying)
+        # Build mutable offers dict keyed by lead investor id (ADK-generated terms)
+        offers_list   = await self._build_offers(qualifying)
         active_offers = {o["investors"][0]: o for o in offers_list}
 
-        # Each investor speaks their offer one at a time
+        # Each investor speaks their offer one at a time (ADK-generated for natural variation)
         for lead_id, offer in active_offers.items():
-            rep_name = INVESTOR_PERSONAS[lead_id]["name"]
-            if self.is_ja:
-                offer_speech = (f"私は{offer['cash']}を株式{offer['equity']}%でオファーします。"
-                                f"条件：{offer['terms']}")
-            else:
-                offer_speech = (f"I'm offering {offer['cash']} for {offer['equity']}% equity. "
-                                f"Terms: {offer['terms']}")
+            rep_name    = INVESTOR_PERSONAS[lead_id]["name"]
+            offer_speech = await self._generate_offer_speech(lead_id, offer)
             self._add_to_history(lead_id, offer_speech)
-            await self._log(f"{rep_name} Agent",
-                            f"Presenting offer: {offer['cash']} for {offer['equity']}%", "success")
             await self._emit("offer_speech", {
                 "sender": lead_id, "senderName": rep_name,
                 "text": offer_speech, "offer": offer,
             })
 
         # Show offer panel after all speeches are spoken
-        await self._emit("bargaining_start", {"offers": list(active_offers.values())})
+        await self._emit("bargaining_start", {"offers": list(active_offers.values()), "isRevision": False})
 
         # ── Negotiation loop ────────────────────────────────────────────────
         # REAL mode: unbounded — the human decides when to stop (accept/walk away).
@@ -805,9 +803,9 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                             f"{target_name} revised their offer: {updated['cash']} for {updated['equity']}%."
                         )
                     })
-                    # bargaining_start re-shows panel with updated terms; loop continues
+                    # bargaining_start re-shows panel with revised terms; loop continues
                     await self._emit("bargaining_start",
-                                     {"offers": list(active_offers.values())})
+                                     {"offers": list(active_offers.values()), "isRevision": True})
 
                 else:
                     # Hard reject — remove this offer from the table
@@ -825,9 +823,9 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                         })
                         await self._generate_report(deal=None)
                         return  # ← terminates
-                    # Show remaining offers; loop continues
+                    # Show remaining offers after withdrawal; loop continues
                     await self._emit("bargaining_start",
-                                     {"offers": list(active_offers.values())})
+                                     {"offers": list(active_offers.values()), "isRevision": True})
 
             else:  # walk_away
                 await self._emit("system_message", {
@@ -851,6 +849,49 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
 
         # Safety net: active_offers emptied without an explicit return above
         await self._generate_report(deal=None)
+
+    async def _generate_offer_speech(self, inv_id: str, offer: dict) -> str:
+        """Generate a natural, personality-driven offer announcement via ADK."""
+        name  = INVESTOR_PERSONAS[inv_id]["name"]
+        focus = INVESTOR_PERSONAS[inv_id]["focus"]
+
+        # Joint-offer note
+        if offer.get("isJoint") and len(offer.get("investors", [])) > 1:
+            partner_id   = [i for i in offer["investors"] if i != inv_id]
+            partner_name = INVESTOR_PERSONAS[partner_id[0]]["name"] if partner_id else ""
+            joint_note   = f"You are making this offer jointly with {partner_name}."
+        else:
+            joint_note = ""
+
+        royalty_hint = (
+            "Mention the royalty percentage and that it is calculated on net sales."
+            if "royalty" in offer.get("terms", "").lower() else ""
+        )
+
+        prompt = f"""GENERATE OFFER
+You are {name}. Investment focus: {focus}.
+You have decided to make an offer. Here are the exact terms you are offering:
+- Amount: {offer['cash']}
+- Equity: {offer['equity']}%
+- Full deal structure: {offer['terms']}
+{joint_note}
+
+Deliver your offer in your own voice — the way YOU would say it on Shark Tank.
+{royalty_hint}
+State the amount, equity %, and any royalty or special conditions clearly and specifically.
+Under 60 words. No preamble, no meta-text.
+Language: {'Japanese' if self.is_ja else 'English'}"""
+
+        await self._log(f"{name} Agent",
+                        f"Generating offer speech: {offer['cash']} for {offer['equity']}%", "success")
+        text = await self._run_investor_agent(inv_id, prompt)
+        text = text.strip()
+        if not text:
+            if self.is_ja:
+                text = f"{offer['cash']}、株式{offer['equity']}%でオファーします。条件：{offer['terms']}"
+            else:
+                text = f"I'm in for {offer['cash']} at {offer['equity']}% equity. {offer['terms']}"
+        return text
 
     async def _close_deal(self, offer: dict):
         """Founder accepts an offer: speaks acceptance, emits deal confirmation, generates report."""
@@ -998,60 +1039,120 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             "counter_offer": None,
         })
 
-    def _build_offers(self, qualifying: list) -> list:
-        offers       = []
-        joint_taken  = set()
-        cfg          = self.config
+    async def _generate_single_offer_terms(
+        self, inv_id: str, conf: int,
+        ask_amount: str, ask_equity: int, joint_partner: str = "",
+    ) -> tuple[int, str]:
+        """Ask the investor's ADK agent to propose their own equity % and deal terms."""
+        name    = INVESTOR_PERSONAS[inv_id]["name"]
+        focus   = INVESTOR_PERSONAS[inv_id]["focus"]
+        startup = self.config.get("startupName", "the startup")
+        sector  = self.config.get("sector", "tech")
 
-        # Optional joint offer between two high-confidence investors
+        # Confidence tier hint — guides aggression without hardcoding numbers
+        if conf >= 85:
+            tier_hint = "You are very enthusiastic. Your terms should be fair and close to what the founder asked."
+        elif conf >= 70:
+            tier_hint = "You are interested but want a better deal. Negotiate for more equity, or add a royalty or other structure."
+        else:
+            tier_hint = "You are lukewarm. You need significantly better terms to justify the risk — push harder on equity or add protective structures."
+
+        joint_note = (
+            f"This is a joint offer with {joint_partner}. Structure the terms to reflect a combined investment."
+            if joint_partner else ""
+        )
+
+        prompt = f"""GENERATE OFFER TERMS
+You are {name}. Investment focus: {focus}.
+Startup: {startup} ({sector})
+Founder's ask: {ask_amount} for {ask_equity}% equity.
+Your confidence: {conf}%.
+{tier_hint}
+{joint_note}
+
+Decide your deal terms. Let your personality and focus area shape the structure.
+You may propose: equity stake, royalty (as X% on net sales), loan/debt structure,
+interest rate, milestone conditions, board seat — whatever fits your style.
+
+Return ONLY valid JSON, no markdown fences:
+{{
+  "equity": <integer — your equity % demand>,
+  "terms": "<full deal conditions in one sentence. Use specific numbers — royalty %, recoupment expressed as a multiple of the investment, interest rate %, any milestones. Never write a dollar amount for recoupment; always state the multiple>"
+}}
+Language: {'Japanese' if self.is_ja else 'English'}"""
+
+        await self._log(f"{name} Agent", f"Generating offer terms (confidence {conf}%)...", "info")
+        raw    = await self._run_investor_agent(inv_id, prompt)
+        result = self._parse_json(raw, {"equity": ask_equity, "terms": ""})
+
+        raw_equity = result.get("equity", ask_equity)
+        try:
+            equity = int(float(str(raw_equity).replace("%", "").strip()))
+        except (ValueError, TypeError):
+            equity = ask_equity
+        equity = max(1, min(49, equity))          # safety clamp: 1–49%
+        terms  = result.get("terms", "").strip()
+        if not terms:
+            terms = f"{ask_amount} for {equity}% equity." if not self.is_ja else f"{ask_amount}で株式{equity}%。"
+        return equity, terms
+
+    async def _build_offers(self, qualifying: list) -> list:
+        """Build offer list — each shark's ADK agent decides their own terms."""
+        offers      = []
+        joint_taken = set()
+        cfg         = self.config
+        ask_amount  = cfg.get("askAmount", "$500K")
+        ask_equity  = int(cfg.get("askEquity", 10))
+
+        # Optional joint offer: two mid-confidence investors team up (30% chance)
         eligible_joint = [
             i for i in qualifying
             if 75 <= self.investor_states[i]["confidence"] <= 90
         ]
         if len(eligible_joint) >= 2 and random.random() < 0.3:
-            j0, j1       = eligible_joint[0], eligible_joint[1]
-            joint_taken  = {j0, j1}
-            names        = f"{INVESTOR_PERSONAS[j0]['name']} & {INVESTOR_PERSONAS[j1]['name']}"
+            j0, j1  = eligible_joint[0], eligible_joint[1]
+            joint_taken = {j0, j1}
+            avg_conf = (self.investor_states[j0]["confidence"] + self.investor_states[j1]["confidence"]) // 2
+            names    = f"{INVESTOR_PERSONAS[j0]['name']} & {INVESTOR_PERSONAS[j1]['name']}"
+            equity, terms = await self._generate_single_offer_terms(
+                j0, avg_conf, ask_amount, ask_equity,
+                joint_partner=INVESTOR_PERSONAS[j1]["name"],
+            )
             offers.append({
                 "id":        f"joint_{random.randint(1000, 9999)}",
                 "investors": [j0, j1],
-                "cash":      cfg.get("askAmount"),
-                "equity":    round(int(cfg.get("askEquity", 10)) * 1.5),
-                "terms":     (f"{names}による共同投資。両者のネットワークをフル活用。"
-                              if self.is_ja else
-                              f"Joint investment by {names}. Full access to both networks."),
+                "cash":      ask_amount,
+                "equity":    equity,
+                "terms":     terms,
                 "isJoint":   True,
                 "revised":   False,
             })
 
-        for inv_id in qualifying:
-            if inv_id in joint_taken:
-                continue
-            conf = self.investor_states[inv_id]["confidence"]
-            ask_equity = int(cfg.get("askEquity", 10))
-
-            if conf >= 85:
-                equity = ask_equity
-                terms  = ("希望通りの条件で投資します。" if self.is_ja
-                          else "Offering the exact terms requested.")
-            elif conf >= 70:
-                equity = round(ask_equity * 1.2)
-                terms  = (f"株式{equity}%とロイヤリティ付きで投資します。" if self.is_ja
-                          else f"Offering {cfg.get('askAmount')} for {equity}% plus royalty until I recoup 120%.")
-            else:
-                equity = min(49, round(ask_equity * 2.5))
-                terms  = (f"バリュエーションが高すぎます。株式{equity}%を要求します。" if self.is_ja
-                          else f"Your valuation is unacceptable. Demanding {equity}% equity.")
-
-            offers.append({
-                "id":        f"{inv_id}_{random.randint(1000, 9999)}",
-                "investors": [inv_id],
-                "cash":      cfg.get("askAmount"),
-                "equity":    equity,
-                "terms":     terms,
-                "isJoint":   False,
-                "revised":   False,
-            })
+        # Individual offers — all generated in parallel (one ADK call per investor)
+        solo_investors = [i for i in qualifying if i not in joint_taken]
+        if solo_investors:
+            results = await asyncio.gather(
+                *[self._generate_single_offer_terms(
+                    inv_id,
+                    self.investor_states[inv_id]["confidence"],
+                    ask_amount, ask_equity,
+                ) for inv_id in solo_investors],
+                return_exceptions=True,
+            )
+            for inv_id, result in zip(solo_investors, results):
+                if isinstance(result, Exception):
+                    equity, terms = ask_equity, ""
+                else:
+                    equity, terms = result
+                offers.append({
+                    "id":        f"{inv_id}_{random.randint(1000, 9999)}",
+                    "investors": [inv_id],
+                    "cash":      ask_amount,
+                    "equity":    equity,
+                    "terms":     terms,
+                    "isJoint":   False,
+                    "revised":   False,
+                })
 
         return offers
 
@@ -1105,6 +1206,18 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         detailed_feedback = dict(zip(INVESTOR_IDS, feedbacks_list))
 
         # Generate overall report using Vincent (financial expert) as lead analyst
+        if deal:
+            deal_investors = ", ".join(
+                INVESTOR_PERSONAS[i]["name"] for i in deal.get("investors", []) if i in INVESTOR_PERSONAS
+            )
+            deal_context = (
+                f"DEAL CLOSED: {deal_investors} invested {deal.get('cash')} "
+                f"for {deal.get('equity')}% equity. "
+                f"Full terms: {deal.get('terms', 'standard equity deal')}"
+            )
+        else:
+            deal_context = "NO DEAL: Founder walked away or all offers were rejected."
+
         report_prompt = f"""GENERATE REPORT FEEDBACK
 You are acting as a senior VC analyst, compiling a final investment memo.
 
@@ -1112,6 +1225,7 @@ Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Founder: {self.config.get('founderName')}
 Ask: {self.config.get('askAmount')} for {self.config.get('askEquity')}%
 Investor outcomes: {investor_summary}
+Deal outcome: {deal_context}
 
 Recent conversation:
 {history_str}
@@ -1151,17 +1265,19 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         else:
             invested = [i for i in INVESTOR_IDS if self.investor_states[i]["status"] == "INVEST"]
             if invested:
+                # Safety fallback: deal exists but _close_deal wasn't called explicitly.
+                # Use the last-known offer for those investors if available, otherwise
+                # surface a minimal record so the report isn't missing a term sheet.
                 report["agreedTermSheet"] = {
                     "id":        "auto_deal",
                     "investors": invested,
                     "cash":      self.config.get("askAmount"),
-                    "equity":    int(self.config.get("askEquity", 10)) + 5,
-                    "terms":     ("マイルストーン達成を条件とする。" if self.is_ja
-                                  else "Subject to milestone reviews."),
+                    "equity":    int(self.config.get("askEquity", 10)),
+                    "terms":     "",   # no hardcoded terms — ADK path always uses _close_deal
                     "isJoint":   len(invested) > 1,
                 }
             else:
-                report["agreedTermSheet"] = None
+                report["agreedTermSheet"] = None   # no deal reached
 
         await self._log("Google ADK Orchestrator", "Report generated. Simulation complete.", "success")
         await self._emit("report", {"data": report})
