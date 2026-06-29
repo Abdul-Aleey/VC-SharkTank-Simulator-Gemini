@@ -864,9 +864,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         try:
             offers_list = await self._build_offers(qualifying)
         except Exception as exc:
-            err_msg = f"Offer generation failed: {exc}"
-            await self._log("Google ADK Orchestrator", err_msg, "error")
-            await self._emit("system_message", {"text": f"[Error] {err_msg}"})
+            await self._log("Google ADK Orchestrator", f"Offer generation failed: {exc}", "error")
             await self._generate_report(deal=None)
             return
         active_offers = {o["investors"][0]: o for o in offers_list}
