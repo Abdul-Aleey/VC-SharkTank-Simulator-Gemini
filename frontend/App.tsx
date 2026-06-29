@@ -137,7 +137,13 @@ export default function App() {
       window.speechSynthesis.cancel();
       setTimeout(() => {
         if (currentToken !== speechTokenRef.current) { resolve(); return; }
-        const utterance = new SpeechSynthesisUtterance(text);
+        const ttsText = text
+          .replace(/\*\*(.*?)\*\*/g, '$1')
+          .replace(/\*(.*?)\*/g, '$1')
+          .replace(/_(.*?)_/g, '$1')
+          .replace(/`([^`]*)`/g, '$1')
+          .replace(/[*_`#~]/g, '');
+        const utterance = new SpeechSynthesisUtterance(ttsText);
         utterance.volume = 1.0;
         utterance.lang = config.language === Language.JA ? 'ja-JP' : 'en-US';
         const voices = window.speechSynthesis.getVoices();

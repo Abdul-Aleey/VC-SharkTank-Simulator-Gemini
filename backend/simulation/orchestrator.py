@@ -443,7 +443,7 @@ Ask ONE expert-level question that:
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
         text = await self._run_investor_agent(inv_id, prompt)
-        question = text.strip()
+        question = self._strip_md(text)
 
         # Record so future rounds avoid repeating this topic
         self.investor_states[inv_id]["questionsHistory"].append(question)
@@ -659,7 +659,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             "warning",
         )
         text = await self._run_investor_agent(speaker, prompt)
-        text = text.strip().strip('"').strip("'")
+        text = self._strip_md(text).strip('"').strip("'")
         if not text:
             return
 
@@ -694,7 +694,7 @@ Sound natural and confident. No meta-text. No quotes.
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
         text = await self._run_investor_agent(partner_id, prompt)
-        text = text.strip().strip('"').strip("'")
+        text = self._strip_md(text).strip('"').strip("'")
         if not text:
             return
 
@@ -780,7 +780,7 @@ Recent room context:
 {history_str}"""
 
         text = await self._run_investor_agent(reactor, prompt)
-        text = text.strip().strip('"').strip("'")
+        text = self._strip_md(text).strip('"').strip("'")
         if not text:
             return
 
@@ -1001,11 +1001,12 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                 )
 
                 # Shark speaks their response in their own voice
-                self._add_to_history(target_id, result["speech"])
+                speech_text = self._strip_md(result.get("speech", ""))
+                self._add_to_history(target_id, speech_text)
                 await self._emit("banter", {
                     "sender":     target_id,
                     "senderName": target_name,
-                    "text":       result["speech"],
+                    "text":       speech_text,
                 })
 
                 if result["accepted"]:
@@ -1111,7 +1112,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         await self._log(f"{name} Agent",
                         f"Generating offer speech: {offer['cash']} for {offer['equity']}%", "success")
         text = await self._run_investor_agent(inv_id, prompt)
-        text = text.strip()
+        text = self._strip_md(text)
         if not text:
             if self.is_ja:
                 text = f"{offer['cash']}、株式{offer['equity']}%でオファーします。条件：{offer['terms']}"
@@ -1748,7 +1749,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
 
         await self._log(f"{name} Agent", "Generating contextual exit speech...", "warning")
         text = await self._run_investor_agent(inv_id, prompt)
-        text = text.strip()
+        text = self._strip_md(text)
 
         # Fallback if response is empty or too long
         if not text or len(text) > 300:
@@ -1772,6 +1773,17 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         return text
 
     @staticmethod
+    @staticmethod
+    def _strip_md(text: str) -> str:
+        """Remove markdown formatting characters that TTS would read literally."""
+        import re
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+        text = re.sub(r'\*(.*?)\*', r'\1', text)
+        text = re.sub(r'_(.*?)_', r'\1', text)
+        text = re.sub(r'`([^`]*)`', r'\1', text)
+        text = re.sub(r'[*_`#~]', '', text)
+        return text.strip()
+
     def _parse_json(raw: str, fallback: dict) -> dict:
         try:
             text = raw.strip()
