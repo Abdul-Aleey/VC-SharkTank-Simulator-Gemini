@@ -121,10 +121,11 @@ async def ws_simulate(websocket: WebSocket):
     # ── Create orchestrator ───────────────────────────────────────────────────
     orchestrator = SimulationOrchestrator(config=config, api_key=api_key)
 
-    # ── Three concurrent tasks ────────────────────────────────────────────────
+    # ── Four concurrent tasks ─────────────────────────────────────────────────
     # 1. run_sim    — drives the ADK agents, pushes events into orchestrator._q
     # 2. send_events — drains _q and sends JSON to the browser
     # 3. recv_msgs  — reads incoming browser messages (responses, offers, etc.)
+    # 4. keepalive  — pings every 25 s so proxies/browsers don't drop idle WS
 
     async def run_sim():
         try:
@@ -154,7 +155,9 @@ async def ws_simulate(websocket: WebSocket):
                     continue
 
                 action = incoming.get("action")
-                if action == "speech_done":
+                if action == "ping":
+                    pass  # keepalive reply — nothing to do
+                elif action == "speech_done":
                     await orchestrator.receive_speech_done()
                 elif action == "founder_response":
                     await orchestrator.receive_founder_response(incoming.get("text", ""))
@@ -178,10 +181,29 @@ async def ws_simulate(websocket: WebSocket):
         except Exception:
             pass
 
+    async def keepalive():
+        """Ping every 25 s to prevent proxies and browsers from closing idle connections."""
+        try:
+            while True:
+                await asyncio.sleep(25)
+                await websocket.send_text(json.dumps({"type": "ping"}))
+        except Exception:
+            pass
+
+    # Use asyncio.wait so that when the WebSocket closes (send_events or recv_msgs
+    # exits early) we immediately cancel the simulation rather than letting run_sim
+    # block for up to 60 s waiting on speech_done signals that will never arrive.
+    tasks = {
+        asyncio.create_task(run_sim()),
+        asyncio.create_task(send_events()),
+        asyncio.create_task(recv_msgs()),
+        asyncio.create_task(keepalive()),
+    }
     try:
-        await asyncio.gather(run_sim(), send_events(), recv_msgs())
-    except WebSocketDisconnect:
-        pass
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
     except Exception as exc:
         try:
             await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))

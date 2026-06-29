@@ -582,8 +582,9 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         try:
             history_str   = self._history_str(last=10)
             founder_first = self.config.get('founderName', 'Founder').split()[0]
+            focus = INVESTOR_PERSONAS[inv_id]["focus"]
             prompt = f"""EVALUATE RESPONSE
-You are evaluating as {name}.
+You are {name}, a sharp investor focused on: {focus}.
 
 Founder ({founder_first}) said: "{founder_response}"
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
@@ -594,6 +595,14 @@ NAMING RULE: In thoughtBubble text use "{founder_first}" not "he/she/the founder
 
 Conversation history:
 {history_str}
+
+CONFIDENCE RULES — you MUST adjust the number, never echo it back unchanged:
+- Strong, specific answer with real metrics → increase by 8–18
+- Solid answer but vague on details → increase by 3–7
+- Neutral / no new info → decrease by 2–5
+- Weak, evasive, or contradictory answer → decrease by 8–15
+- Serious red flag or direct lie → decrease by 15–25
+Base the change on YOUR focus area ({focus}). The new value must be 0–100.
 
 Return ONLY valid JSON, no markdown fences:
 {{
@@ -888,9 +897,17 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                 await self._joint_partner_endorsement(partner_id, lead_id, offer)
 
             offers_so_far.append((lead_id, offer))
-            # After the first offer is on the table, other sharks may react
-            if len(offers_so_far) >= 1:
+            # Rivals react after each offer — but skip banter after the last one so
+            # the negotiation phase starts promptly without extra TTS queuing up.
+            is_last_offer = len(offers_so_far) == len(active_offers)
+            if not is_last_offer:
                 await self._maybe_offer_banter(lead_id, offer, active_offers)
+
+        # Drain any speech_done signals that arrived late (banter TTS finished after the
+        # 60 s timeout fired). Without this, stale signals bleed into the negotiation loop
+        # and cause _wait_for_speech_done calls there to resolve instantly on wrong events.
+        while not self._speech_done_q.empty():
+            self._speech_done_q.get_nowait()
 
         # Emit panel marker — queued behind TTS on frontend so bargaining buttons
         # only unlock after all offer speeches have finished playing.
@@ -959,6 +976,9 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                         "senderName": self.config.get("founderName", "Founder"),
                         "text":       speech,
                     })
+                    # Consume the speech_done the frontend sends after TTS so it
+                    # doesn't leak into the next _wait_for_speech_done (revised offer).
+                    await self._wait_for_speech_done()
                     await self._set_founder_agent_state("IDLE")
             else:
                 # REAL mode — block until the user sends an action
@@ -1813,7 +1833,6 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         return text
 
     @staticmethod
-    @staticmethod
     def _strip_md(text: str) -> str:
         """Remove markdown formatting characters that TTS would read literally."""
         import re
@@ -1824,6 +1843,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         text = re.sub(r'[*_`#~]', '', text)
         return text.strip()
 
+    @staticmethod
     def _parse_json(raw: str, fallback: dict) -> dict:
         try:
             text = raw.strip()

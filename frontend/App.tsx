@@ -446,6 +446,9 @@ export default function App() {
         break;
       }
 
+      case 'ping':
+        break; // keepalive from server — nothing to do
+
       case 'disconnected':
         break;
     }
