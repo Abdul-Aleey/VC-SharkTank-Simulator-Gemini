@@ -98,7 +98,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = chatEndRef.current;
+    if (el) el.parentElement?.scrollTo({ top: el.parentElement.scrollHeight, behavior: 'smooth' });
   }, [chat]);
 
   // ── API key handlers ──────────────────────────────────────────────────────
@@ -133,9 +134,13 @@ export default function App() {
     if (isMuted) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const currentToken = ++speechTokenRef.current;
-      window.speechSynthesis.cancel();
+      // Token check first: if we've already been superseded, bail without touching the engine.
+      // Only cancel if a newer token exists so we don't reset the engine unnecessarily —
+      // an unnecessary cancel() on Windows Chrome forces a 3-6 s TTS engine restart.
       setTimeout(() => {
         if (currentToken !== speechTokenRef.current) { resolve(); return; }
+        if (currentToken > 1) window.speechSynthesis.cancel();
+        window.speechSynthesis.resume(); // wake the engine if it paused during silence
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.volume = 1.0;
         utterance.lang = config.language === Language.JA ? 'ja-JP' : 'en-US';

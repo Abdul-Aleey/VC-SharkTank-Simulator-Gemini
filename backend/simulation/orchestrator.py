@@ -686,9 +686,10 @@ You are {partner_p['name']} — {partner_p['bio']}
 Your expertise: {partner_p['focus']}
 
 {lead_name} just presented the joint offer terms. Now it's your turn to speak.
-Do NOT repeat the equity or dollar amounts — {lead_name} already covered that.
-In 1-2 sentences (under 35 words), tell {founder_first} specifically what YOU bring to this partnership
-that makes the joint deal more valuable than any solo offer. Be concrete about your expertise and network.
+Open by briefly acknowledging the partnership — e.g. "I'm joining {lead_name} on this deal" or
+"We're coming in together on this." Then in 1-2 sentences (under 35 words total), tell {founder_first}
+specifically what YOU personally bring that makes this joint deal stronger than any solo offer.
+Be concrete about your expertise and network. Do NOT repeat the equity or dollar amounts.
 Sound natural and confident. No meta-text. No quotes.
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
@@ -822,6 +823,13 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
     # ─── Bargaining phase ─────────────────────────────────────────────────────
 
     async def _phase_bargaining(self):
+        # Drain any stale speech_done signals left over from the Q&A phase.
+        # When the last Q&A round has no next asker, the backend skips _wait_for_speech_done()
+        # but the frontend still sends one after TTS ends. Without this drain, the stale signal
+        # would be consumed by the first offer_speech wait, causing it to resolve before TTS finishes.
+        while not self._speech_done_q.empty():
+            self._speech_done_q.get_nowait()
+
         qualifying = [
             i for i in INVESTOR_IDS
             if self.investor_states[i]["confidence"] > CONFIDENCE_OUT
@@ -895,16 +903,39 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         while active_offers:
             neg_round += 1
 
-            # AI-only safety: after 4 rounds force-close on best remaining offer
+            # AI-only safety: after 4 rounds, force a final decision (accept or walk away)
+            # — prevents infinite counter loops while still respecting the founder's judgement.
             if self.mode == "ai" and neg_round > MAX_AI_ROUNDS:
-                best_id = min(active_offers, key=lambda i: active_offers[i]["equity"])
-                name    = INVESTOR_PERSONAS[best_id]["name"]
                 await self._emit("system_message", {
-                    "text": (f"交渉を終了。{name}の最終オファーで合意します。"
+                    "text": ("交渉ラウンドが終了しました。起業家が最終判断を下します。"
                              if self.is_ja else
-                             f"Concluding negotiation — accepting {name}'s current offer.")
+                             "Negotiation rounds complete. The founder makes their final call.")
                 })
-                await self._close_deal(active_offers[best_id])
+                decision    = await self._ai_founder_decide_action(active_offers)
+                action_type = decision.get("action", "accept")
+                # Counter is no longer allowed at this point — collapse it to accept
+                if action_type == "counter":
+                    action_type = "accept"
+                target_id = decision.get("investorId", min(active_offers, key=lambda i: active_offers[i]["equity"]))
+                if target_id not in active_offers:
+                    target_id = min(active_offers, key=lambda i: active_offers[i]["equity"])
+                speech = decision.get("speech", "")
+                if speech:
+                    self._add_to_history("founder", speech)
+                    await self._emit("founder_response", {
+                        "sender": "founder",
+                        "senderName": self.config.get("founderName", "Founder"),
+                        "text": speech,
+                    })
+                if action_type == "walk_away":
+                    await self._emit("system_message", {
+                        "text": ("起業家はすべてのオファーを辞退し、タンクを去りました。"
+                                 if self.is_ja else
+                                 "The entrepreneur walked away from all offers.")
+                    })
+                    await self._generate_report(deal=None)
+                else:
+                    await self._close_deal(active_offers[target_id])
                 return
 
             # ── Get next action ────────────────────────────────────────────
@@ -995,6 +1026,11 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                     active_offers[target_id] = updated
                     revised_speech = await self._generate_offer_speech(target_id, updated)
                     self._add_to_history(target_id, revised_speech)
+                    # Drain any stale speech_done from the founder's negotiation speech
+                    # (AI mode sends speech_done after founder_response TTS; nobody waits for it
+                    # in the negotiation path, so it would incorrectly satisfy this wait).
+                    while not self._speech_done_q.empty():
+                        self._speech_done_q.get_nowait()
                     await self._emit("offer_speech", {
                         "sender": target_id, "senderName": target_name,
                         "text": revised_speech, "offer": updated,
@@ -1024,22 +1060,11 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                     await self._emit("bargaining_start",
                                      {"offers": list(active_offers.values()), "isRevision": True})
 
-            else:  # walk_away
+            else:  # walk_away — founder declines all offers
                 await self._emit("system_message", {
-                    "text": ("起業家はすべてのオファーを辞退し、立ち去りました。"
+                    "text": ("起業家はすべてのオファーを辞退し、タンクを去りました。"
                              if self.is_ja else
-                             "The entrepreneur declined all offers and walked away.")
-                })
-                snark = (
-                    "君はただのマネー・インシネレーターだ。泣きながら家に帰るんだね。"
-                    if self.is_ja else
-                    "You are just a cash incinerator. Go home and cry to your mother."
-                )
-                self._add_to_history("vincent", snark)
-                await self._emit("banter", {
-                    "sender":     "vincent",
-                    "senderName": INVESTOR_PERSONAS["vincent"]["name"],
-                    "text":       snark,
+                             "The entrepreneur walked away from all offers.")
                 })
                 await self._generate_report(deal=None)
                 return  # ← terminates
@@ -1056,7 +1081,10 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         if offer.get("isJoint") and len(offer.get("investors", [])) > 1:
             partner_id   = [i for i in offer["investors"] if i != inv_id]
             partner_name = INVESTOR_PERSONAS[partner_id[0]]["name"] if partner_id else ""
-            joint_note   = f"You are making this offer jointly with {partner_name}."
+            joint_note   = (
+                f"This is a joint offer. Refer to yourself as 'I' and your co-investor as '{partner_name}'. "
+                f"Say something like '{partner_name} and I are offering...' or 'I'm teaming up with {partner_name}...'"
+            )
         else:
             joint_note = ""
 
@@ -1074,6 +1102,7 @@ You have decided to make an offer. Here are the exact terms you are offering:
 {joint_note}
 
 Deliver your offer in your own voice — the way YOU would say it on Shark Tank.
+Do NOT introduce yourself by name. You are already speaking; just make the offer.
 {royalty_hint}
 State the amount, equity %, and any royalty or special conditions clearly and specifically.
 Under 60 words. No preamble, no meta-text.
@@ -1158,6 +1187,9 @@ Is it financial discipline, tech credibility, brand building, or distribution mu
 Match that need against the sharks' expertise — then decide who to partner with and how hard to push.
 A founder who counters too aggressively risks losing the deal; one who folds too fast leaves value behind.
 Pick the move that serves your company, not just your ego.
+
+WALK AWAY: If every offer on the table is a bad deal — equity too high, wrong expertise, terms that would cripple the company — walk away. A bad deal is worse than no deal. Use walk_away if no offer comes close to your original ask and no counter would fix it.
+
 Valid investor IDs: {', '.join(active_offers.keys())}
 
 COUNTER RULE (absolute): If you counter, your equity % MUST be between {ask_equity}% (your original ask) and the investor's offered equity %. The investment amount stays {cfg.get('askAmount')}. Never go below {ask_equity}%.
@@ -1165,9 +1197,9 @@ COUNTER RULE (absolute): If you counter, your equity % MUST be between {ask_equi
 Return ONLY valid JSON, no markdown fences:
 {{
   "action": "accept" | "counter" | "walk_away",
-  "investorId": "<exact investor id — required for accept/counter>",
+  "investorId": "<exact investor id — required for accept/counter, omit if walk_away>",
   "counterEquity": <integer equity % you are countering with — required if action is counter, must be between {ask_equity} and the investor's offered equity>,
-  "speech": "<what you say to the room, 25-40 words, specific and strategic — name the investor and why you're choosing them or pushing back>",
+  "speech": "<what you say to the room, 25-40 words — if walk_away, state clearly why you are declining and what was wrong with the offers; if accept/counter, name the investor and your reasoning>",
   "counterText": "<your counter-proposal in plain English — required if action is counter>"
 }}
 Language: {'Japanese' if self.is_ja else 'English'}"""
