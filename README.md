@@ -30,9 +30,11 @@ The backend is Python FastAPI with Google ADK. The frontend is React with TypeSc
 
 **Q&A phase:** Each round, the four investors take turns asking questions in randomised order. Questions come from each investor's own ADK agent, grounded in what was actually said in the pitch. After every answer, all active investors evaluate in parallel. Investors at or below 25% confidence drop out and deliver an exit speech; the rest continue.
 
-**Offer phase:** Once all rounds finish, investors above the threshold enter the offer round. Each investor's ADK agent decides their own deal structure from scratch: no template, no hardcoded multipliers. Royalty is always expressed as a percentage on net sales. Recoupment is always a multiple of the investment. The offer card for each investor appears on screen only after their speech finishes.
+**Offer phase:** Once all rounds finish, investors above the threshold enter the offer round. Each investor's ADK agent decides their own deal structure from scratch: no template, no hardcoded multipliers. Royalty is always expressed as a percentage on net sales. Recoupment is always a multiple of the investment. The offer card for each investor appears on screen only after their speech finishes — one by one, in sync with each shark's spoken offer.
 
-**Bargaining:** In Real mode you can accept, counter, or walk away per shark. Counter-offers go to that specific shark's ADK agent, who responds in character. If they revise their terms, the card updates immediately. If they reject, their card disappears.
+Two sharks with closely matching confidence scores may team up and present a joint offer, pitching the combined power of their expertise. After each offer is presented, rival sharks have a 35% chance to react — highlighting their own value-add, pitching their network or domain expertise, or gently competing for the deal. The founder may occasionally respond to these pitches with a brief, character-driven remark.
+
+**Bargaining:** In Real mode you can accept, counter, or walk away per shark. Counter-offers go to that specific shark's ADK agent, who responds in character. If they revise their terms, the shark speaks the revised offer and the card updates in-place after their speech ends. If they reject, their card disappears. In AI mode, the founder reasons about which shark's expertise best matches what the startup actually needs — not just who offered the lowest equity.
 
 **Report:** The final memo generates after the deal is finalised and the founder's acceptance speech completes. The agreed term sheet in the memo includes the full structure: equity, royalty, recoupment multiple, interest rate, and any other conditions the shark included.
 

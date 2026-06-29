@@ -439,7 +439,7 @@ Ask ONE expert-level question that:
 - Uses your deep expertise in {focus} to expose something most investors would miss
 - Cannot be answered with vague platitudes
 - Is under 40 words, direct, conversational — no preamble or meta-text
-- Use the founder's name only when it flows naturally — not forced into every sentence
+- Do NOT use the founder's name in the question. Ask directly without addressing them by name.
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
         text = await self._run_investor_agent(inv_id, prompt)
@@ -665,7 +665,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
 
         self.investor_states[speaker]["agentState"] = "BANTERING"
         await self._emit_investor_update(speaker)
-        self._add_to_history(speaker, text)
+        self._add_to_history(speaker, text, is_banter=True)
         await self._emit("banter", {
             "sender":     speaker,
             "senderName": INVESTOR_PERSONAS[speaker]["name"],
@@ -673,6 +673,151 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         })
         self.investor_states[speaker]["agentState"] = "IDLE"
         await self._emit_investor_update(speaker)
+
+    async def _joint_partner_endorsement(self, partner_id: str, lead_id: str, offer: dict):
+        """The non-lead joint partner adds their own angle after the lead presents the terms.
+        They don't repeat the numbers — they pitch the specific value THEY personally bring."""
+        partner_p = INVESTOR_PERSONAS[partner_id]
+        lead_name = INVESTOR_PERSONAS[lead_id]["name"]
+        founder_first = self.config.get("founderName", "Founder").split()[0]
+
+        prompt = f"""JOINT OFFER CO-PITCH
+You are {partner_p['name']} — {partner_p['bio']}
+Your expertise: {partner_p['focus']}
+
+{lead_name} just presented the joint offer terms. Now it's your turn to speak.
+Do NOT repeat the equity or dollar amounts — {lead_name} already covered that.
+In 1-2 sentences (under 35 words), tell {founder_first} specifically what YOU bring to this partnership
+that makes the joint deal more valuable than any solo offer. Be concrete about your expertise and network.
+Sound natural and confident. No meta-text. No quotes.
+Language: {'Japanese' if self.is_ja else 'English'}"""
+
+        text = await self._run_investor_agent(partner_id, prompt)
+        text = text.strip().strip('"').strip("'")
+        if not text:
+            return
+
+        self._add_to_history(partner_id, text)
+        await self._emit("banter", {
+            "sender":     partner_id,
+            "senderName": partner_p["name"],
+            "text":       text,
+        })
+        # Banter events are fire-and-forget — frontend does not send speech_done for banter.
+
+    async def _maybe_offer_banter(self, just_offered_id: str, offer: dict, active_offers: dict):
+        """After a shark presents their offer, a rival reacts — pitching their own value or
+        their combined joint-deal strength. 35% chance. Joint partners never undercut each other."""
+
+        # Build joint-partnership map: investor_id → partner_id (if in a joint deal)
+        joint_partner_of: dict[str, str] = {}
+        for o in active_offers.values():
+            if o.get("isJoint") and len(o["investors"]) >= 2:
+                a, b = o["investors"][0], o["investors"][1]
+                joint_partner_of[a] = b
+                joint_partner_of[b] = a
+
+        # Reactor pool: all lead investors + non-lead joint partners, minus the one who just spoke
+        # and minus anyone who is a joint partner of the just-offered investor (same team).
+        just_offered_partner = joint_partner_of.get(just_offered_id)
+        all_investors_in_play = set(active_offers.keys())
+        for o in active_offers.values():
+            if o.get("isJoint"):
+                all_investors_in_play.update(o["investors"])
+
+        others = [
+            i for i in all_investors_in_play
+            if i != just_offered_id and i != just_offered_partner
+        ]
+        if not others or random.random() > 0.35:
+            return
+
+        reactor       = random.choice(others)
+        reactor_p     = INVESTOR_PERSONAS[reactor]
+        reactor_partner = joint_partner_of.get(reactor)
+        offerer_name  = INVESTOR_PERSONAS[just_offered_id]["name"]
+        founder_first = self.config.get("founderName", "Founder").split()[0]
+        startup_name  = self.config.get("startupName", "this startup")
+        history_str   = self._history_str(last=8)
+
+        # Build reactor identity section — solo vs joint changes how they pitch themselves
+        if reactor_partner:
+            partner_p = INVESTOR_PERSONAS[reactor_partner]
+            identity_block = (
+                f"You are {reactor_p['name']} — making a JOINT offer with {partner_p['name']}.\n"
+                f"Your expertise: {reactor_p['focus']}\n"
+                f"{partner_p['name']}'s expertise: {partner_p['focus']}\n"
+                f"Together you cover: {reactor_p['focus']} + {partner_p['focus']}"
+            )
+            pitch_angle = (
+                f"Pitch the COMBINED power of you and {partner_p['name']} as a team. "
+                f"Explain what the two of you can do together for {startup_name} that no single investor can. "
+                f"NEVER say anything negative about {partner_p['name']} — you are partners."
+            )
+        else:
+            identity_block = (
+                f"You are {reactor_p['name']} — {reactor_p['bio']}\n"
+                f"Your investment focus: {reactor_p['focus']}"
+            )
+            pitch_angle = (
+                f"Be specific about what YOU bring beyond the money — your network, domain expertise, "
+                f"or strategic value that {offerer_name} simply cannot offer {startup_name}."
+            )
+
+        prompt = f"""OFFER PHASE REACTION
+{identity_block}
+
+{offerer_name} just presented: {offer['cash']} for {offer['equity']}% equity. Terms: {offer.get('terms', 'standard equity')}.
+
+React in one punchy line (under 28 words). {pitch_angle}
+Sound like a real shark — confident, sharp, direct. Appeal to {founder_first} by name if it flows naturally.
+
+RULES: No "?" marks. No questions. No quotes or meta-text. First names only for other investors.
+Language: {'Japanese' if self.is_ja else 'English'}
+
+Recent room context:
+{history_str}"""
+
+        text = await self._run_investor_agent(reactor, prompt)
+        text = text.strip().strip('"').strip("'")
+        if not text:
+            return
+
+        self._add_to_history(reactor, text, is_banter=True)
+        await self._emit("banter", {
+            "sender":     reactor,
+            "senderName": reactor_p["name"],
+            "text":       text,
+        })
+
+        # ~15% chance the founder briefly acknowledges the banter — a light remark,
+        # a gracious nod, or a dry comment. Keeps them present in the room, not silent.
+        if random.random() < 0.15:
+            reactor_name     = reactor_p["name"]
+            founderName      = self.config.get("founderName", "Founder")
+            personality_key  = self.config.get("personality", "excellent")
+            personality_desc = PERSONALITY_GUIDE.get(personality_key, PERSONALITY_GUIDE["excellent"])
+            reply_prompt     = f"""FOUNDER BANTER REPLY
+You are {founderName}, founder of {self.config.get('startupName')} ({self.config.get('sector', '')}).
+Founder personality: {personality_desc}
+
+You are in the middle of an offer negotiation. {reactor_name} just said something to pitch themselves.
+Their comment: "{text}"
+
+Reply in one short line (under 20 words) — stay true to your personality above.
+Respond naturally to the room — you are not committing to anything, just present and engaged.
+No questions. No meta-text. No quotes.
+Language: {'Japanese' if self.is_ja else 'English'}"""
+
+            reply = await self._run_founder_agent(reply_prompt)
+            reply = reply.strip().strip('"').strip("'")
+            if reply:
+                self._add_to_history("founder", reply)
+                await self._emit("banter", {
+                    "sender":     "founder",
+                    "senderName": founderName,
+                    "text":       reply,
+                })
 
     # ─── Bargaining phase ─────────────────────────────────────────────────────
 
@@ -712,7 +857,9 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         offers_list   = await self._build_offers(qualifying)
         active_offers = {o["investors"][0]: o for o in offers_list}
 
-        # Each investor speaks their offer one at a time (ADK-generated for natural variation)
+        # Each investor speaks their offer one at a time; wait for speech_done so cards
+        # reveal one-by-one in sync with each shark's spoken offer.
+        offers_so_far = []
         for lead_id, offer in active_offers.items():
             rep_name    = INVESTOR_PERSONAS[lead_id]["name"]
             offer_speech = await self._generate_offer_speech(lead_id, offer)
@@ -721,9 +868,20 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                 "sender": lead_id, "senderName": rep_name,
                 "text": offer_speech, "offer": offer,
             })
+            await self._wait_for_speech_done()
 
-        # Emit panel marker. Cards are revealed one-by-one on the frontend via
-        # onAfter callbacks — this signal just tells the frontend offer phase has started.
+            # Joint offer: partner (j1) adds their angle after j0 presents the terms
+            if offer.get("isJoint") and len(offer["investors"]) >= 2:
+                partner_id = offer["investors"][1]
+                await self._joint_partner_endorsement(partner_id, lead_id, offer)
+
+            offers_so_far.append((lead_id, offer))
+            # After the first offer is on the table, other sharks may react
+            if len(offers_so_far) >= 1:
+                await self._maybe_offer_banter(lead_id, offer, active_offers)
+
+        # Emit panel marker — queued behind TTS on frontend so bargaining buttons
+        # only unlock after all offer speeches have finished playing.
         await self._emit("bargaining_start", {"offers": list(active_offers.values()), "isRevision": False})
 
         # ── Negotiation loop ────────────────────────────────────────────────
@@ -824,7 +982,8 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                     return  # ← terminates
 
                 elif result.get("counter_offer"):
-                    # Shark counter-countered — update offer and re-show panel
+                    # Shark counter-countered — have them speak the revised offer,
+                    # then update the card after their speech completes.
                     cc      = result["counter_offer"]
                     updated = {
                         **target_offer,
@@ -834,14 +993,14 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                         "revised": True,
                     }
                     active_offers[target_id] = updated
-                    await self._emit("system_message", {
-                        "text": (
-                            f"{target_name}がオファーを修正：{updated['cash']}、株式{updated['equity']}%"
-                            if self.is_ja else
-                            f"{target_name} revised their offer: {updated['cash']} for {updated['equity']}%."
-                        )
+                    revised_speech = await self._generate_offer_speech(target_id, updated)
+                    self._add_to_history(target_id, revised_speech)
+                    await self._emit("offer_speech", {
+                        "sender": target_id, "senderName": target_name,
+                        "text": revised_speech, "offer": updated,
                     })
-                    # bargaining_start re-shows panel with revised terms; loop continues
+                    await self._wait_for_speech_done()
+                    # Sync full panel state after speech completes
                     await self._emit("bargaining_start",
                                      {"offers": list(active_offers.values()), "isRevision": True})
 
@@ -958,33 +1117,58 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
     async def _ai_founder_decide_action(self, active_offers: dict) -> dict:
         """FounderAgent evaluates all current offers and decides negotiation strategy."""
         cfg = self.config
-        offers_summary = "\n".join(
-            f"- {INVESTOR_PERSONAS[inv_id]['name']} ({inv_id}): "
-            f"{o['cash']} for {o['equity']}% equity. Terms: {o.get('terms', 'none')}"
-            for inv_id, o in active_offers.items()
-        )
+        ask_equity       = int(cfg.get('askEquity', 10))
         personality_key  = cfg.get('personality', 'excellent')
         personality_desc = PERSONALITY_GUIDE.get(personality_key, PERSONALITY_GUIDE["excellent"])
+
+        # Each offer shown with the shark's background so the founder can match expertise to need
+        offers_summary = "\n".join(
+            f"- {INVESTOR_PERSONAS[inv_id]['name']} ({inv_id}): "
+            f"{o['cash']} for {o['equity']}% equity. Terms: {o.get('terms', 'none')} | "
+            f"Their expertise: {INVESTOR_PERSONAS[inv_id]['focus']}"
+            for inv_id, o in active_offers.items()
+        )
+
+        # Investor value pitches from offer-phase banter — what each shark said they bring
+        banter_pitches = [
+            f"- {INVESTOR_PERSONAS[m['sender']]['name']}: \"{m['text']}\""
+            for m in self.chat_history[-20:]
+            if m.get("sender") in INVESTOR_IDS and m.get("isBanter")
+        ]
+        pitch_block = (
+            "\nWhat sharks said they bring beyond the money:\n" + "\n".join(banter_pitches)
+            if banter_pitches else ""
+        )
+
         prompt = f"""NEGOTIATE as founder
-You are {cfg.get('founderName')}, founder of {cfg.get('startupName')}.
-Original ask: {cfg.get('askAmount')} for {cfg.get('askEquity')}% equity.
+You are {cfg.get('founderName')}, founder of {cfg.get('startupName')} — {cfg.get('description', '')}
+Sector: {cfg.get('sector', '')}
+Original ask: {cfg.get('askAmount')} for {ask_equity}% equity.
 Founder personality: {personality_desc}
 
-Offers currently on the table:
+Offers on the table (with each investor's domain expertise):
 {offers_summary}
+{pitch_block}
 
 Recent negotiation:
-{self._history_str(last=6)}
+{self._history_str(last=8)}
 
-Decide your next move. Consider equity dilution, investor value, and closing the deal.
+Think like a strategic founder: what does {cfg.get('startupName')} need MOST right now to succeed?
+Is it financial discipline, tech credibility, brand building, or distribution muscle?
+Match that need against the sharks' expertise — then decide who to partner with and how hard to push.
+A founder who counters too aggressively risks losing the deal; one who folds too fast leaves value behind.
+Pick the move that serves your company, not just your ego.
 Valid investor IDs: {', '.join(active_offers.keys())}
+
+COUNTER RULE (absolute): If you counter, your equity % MUST be between {ask_equity}% (your original ask) and the investor's offered equity %. The investment amount stays {cfg.get('askAmount')}. Never go below {ask_equity}%.
 
 Return ONLY valid JSON, no markdown fences:
 {{
   "action": "accept" | "counter" | "walk_away",
-  "investorId": "<exact investor id from the list above — required for accept/counter>",
-  "speech": "<what you say to the room, 25-40 words, strategic, in your own voice>",
-  "counterText": "<your specific counter-proposal — required if action is counter>"
+  "investorId": "<exact investor id — required for accept/counter>",
+  "counterEquity": <integer equity % you are countering with — required if action is counter, must be between {ask_equity} and the investor's offered equity>,
+  "speech": "<what you say to the room, 25-40 words, specific and strategic — name the investor and why you're choosing them or pushing back>",
+  "counterText": "<your counter-proposal in plain English — required if action is counter>"
 }}
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
@@ -996,12 +1180,30 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             "speech": (f"{INVESTOR_PERSONAS[best_id]['name']}のオファーを受け入れます。"
                        if self.is_ja else
                        f"I'll accept {INVESTOR_PERSONAS[best_id]['name']}'s offer. Let's make this happen."),
+            "counterEquity": None,
             "counterText": "",
         }
         result = self._parse_json(raw, fallback)
-        # Validate investorId against active offers
+
+        # Validate investorId
         if result.get("investorId") not in active_offers:
             result["investorId"] = best_id
+
+        # Server-side clamp counterEquity — never trust the model alone
+        if result.get("action") == "counter":
+            target_id     = result["investorId"]
+            investor_eq   = active_offers[target_id]["equity"]
+            raw_ce        = result.get("counterEquity")
+            try:
+                counter_eq = int(float(str(raw_ce).replace("%", "").strip()))
+            except (ValueError, TypeError):
+                counter_eq = ask_equity  # fallback to founder's original ask
+            # Clamp: must be >= ask_equity and <= investor's offered equity
+            counter_eq = max(ask_equity, min(investor_eq, counter_eq))
+            result["counterEquity"] = counter_eq
+            # counterText stays as the founder's natural phrasing — the validated counterEquity
+            # integer is the authoritative source; the shark agent evaluates the proposal in context.
+
         return result
 
     async def _generate_acceptance_speech(self, accepted_offer: dict) -> str:
@@ -1114,9 +1316,11 @@ Decide your deal terms. Let your personality and focus area shape the structure.
 You may propose: equity stake, royalty (as X% on net sales), loan/debt structure,
 interest rate, milestone conditions, board seat — whatever fits your style.
 
+EQUITY RULE (absolute): Your equity demand MUST be >= {ask_equity}% (the founder's ask). You are the investor — you always ask for equal or more equity than the founder offered. The investment amount stays {ask_amount}. Never go below {ask_equity}%.
+
 Return ONLY valid JSON, no markdown fences:
 {{
-  "equity": <integer — your equity % demand>,
+  "equity": <integer — your equity % demand, must be >= {ask_equity}>,
   "terms": "<full deal conditions in one sentence. If you use a royalty structure, write it as 'X% royalty on net sales until recouping N× my investment' — both the percentage AND the multiple must appear together. For any other structure: state interest rate % annually, milestone trigger, board seat, etc. Never omit the percentage when mentioning recoupment>"
 }}
 Language: {'Japanese' if self.is_ja else 'English'}"""
@@ -1130,7 +1334,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             equity = int(float(str(raw_equity).replace("%", "").strip()))
         except (ValueError, TypeError):
             equity = ask_equity
-        equity = max(1, min(49, equity))          # safety clamp: 1–49%
+        equity = max(ask_equity, min(49, equity))  # clamp: must be >= founder's ask, max 49%
         terms  = result.get("terms", "").strip()
         if not terms:
             terms = f"{ask_amount} for {equity}% equity." if not self.is_ja else f"{ask_amount}で株式{equity}%。"
@@ -1144,12 +1348,25 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         ask_amount  = cfg.get("askAmount", "$500K")
         ask_equity  = int(cfg.get("askEquity", 10))
 
-        # Optional joint offer: two mid-confidence investors team up (30% chance)
-        eligible_joint = [
-            i for i in qualifying
-            if 75 <= self.investor_states[i]["confidence"] <= 90
-        ]
-        if len(eligible_joint) >= 2 and random.random() < 0.3:
+        # Joint offer: two sharks with similar confidence levels are more likely to team up.
+        # Probability scales with how close their scores are — nearly identical = ~60% chance,
+        # far apart = ~10% chance. Any confidence level can qualify (not just mid-tier).
+        best_pair, best_prob = None, 0.0
+        for idx, a in enumerate(qualifying):
+            for b in qualifying[idx + 1:]:
+                conf_a = self.investor_states[a]["confidence"]
+                conf_b = self.investor_states[b]["confidence"]
+                diff   = abs(conf_a - conf_b)
+                # Closer confidence → higher base probability (10%–60%)
+                prob = max(0.10, 0.60 - diff * 0.02)
+                if prob > best_prob:
+                    best_prob, best_pair = prob, (a, b)
+
+        eligible_joint = []
+        if best_pair and random.random() < best_prob:
+            eligible_joint = list(best_pair)
+
+        if len(eligible_joint) >= 2:
             j0, j1  = eligible_joint[0], eligible_joint[1]
             joint_taken = {j0, j1}
             avg_conf = (self.investor_states[j0]["confidence"] + self.investor_states[j1]["confidence"]) // 2
@@ -1442,17 +1659,20 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         self._founder_agent_state = state
         await self._emit("founder_agent_state", {"state": state})
 
-    def _add_to_history(self, sender: str, text: str):
+    def _add_to_history(self, sender: str, text: str, is_banter: bool = False):
         name_map = {
             **{i: INVESTOR_PERSONAS[i]["name"] for i in INVESTOR_IDS},
             "founder": self.config.get("founderName", "Founder"),
             "system":  "System",
         }
-        self.chat_history.append({
+        entry: dict = {
             "sender":     sender,
             "senderName": name_map.get(sender, sender),
             "text":       text,
-        })
+        }
+        if is_banter:
+            entry["isBanter"] = True
+        self.chat_history.append(entry)
 
     def _history_str(self, last: int = 10) -> str:
         return "\n".join(

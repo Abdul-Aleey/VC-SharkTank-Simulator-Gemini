@@ -97,6 +97,10 @@ export default function App() {
       });
   }, []);
 
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chat]);
+
   // ── API key handlers ──────────────────────────────────────────────────────
   const handleSaveApiKey = async () => {
     const trimmed = apiKeyInput.trim();
@@ -285,9 +289,16 @@ export default function App() {
         queueMessage(
           offerMsg,
           event.sender as any,
-          offerData ? () => setActiveOffers(prev =>
-            prev.some(o => o.id === offerData.id) ? prev : [...prev, offerData]
-          ) : undefined,
+          () => {
+            if (offerData) {
+              setActiveOffers(prev =>
+                prev.some(o => o.id === offerData.id)
+                  ? prev.map(o => o.id === offerData.id ? offerData : o)  // update in-place
+                  : [...prev, offerData]                                    // new card
+              );
+            }
+            wsRef.current?.sendSpeechDone();
+          },
         );
         break;
       }
@@ -397,18 +408,12 @@ export default function App() {
       }
 
       case 'bargaining_start': {
-        if (event.isRevision) {
-          // Revision or withdrawal during negotiation loop — replace cards immediately
-          // so the panel shows the updated/remaining offers straight away.
+        // Always queue through the speech chain so cards/buttons only update
+        // after all pending TTS (offer speeches or negotiation reactions) finishes.
+        speechQueueRef.current = speechQueueRef.current.then(() => {
           setActiveOffers(event.offers);
           setIsProcessing(false);
-        } else {
-          // Initial offer panel: queue setIsProcessing behind the speech queue so the
-          // bargaining buttons only unlock after all Q&A and offer speeches have played out.
-          speechQueueRef.current = speechQueueRef.current.then(() => {
-            setIsProcessing(false);
-          });
-        }
+        });
         break;
       }
 
