@@ -134,13 +134,9 @@ export default function App() {
     if (isMuted) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const currentToken = ++speechTokenRef.current;
-      // Token check first: if we've already been superseded, bail without touching the engine.
-      // Only cancel if a newer token exists so we don't reset the engine unnecessarily —
-      // an unnecessary cancel() on Windows Chrome forces a 3-6 s TTS engine restart.
+      window.speechSynthesis.cancel();
       setTimeout(() => {
         if (currentToken !== speechTokenRef.current) { resolve(); return; }
-        if (currentToken > 1) window.speechSynthesis.cancel();
-        window.speechSynthesis.resume(); // wake the engine if it paused during silence
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.volume = 1.0;
         utterance.lang = config.language === Language.JA ? 'ja-JP' : 'en-US';

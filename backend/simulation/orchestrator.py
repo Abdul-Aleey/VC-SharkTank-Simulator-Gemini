@@ -1486,12 +1486,16 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             for i in INVESTOR_IDS
         )
 
+        await self._log("Google ADK Orchestrator", "Generating investment memo — querying all investors for final feedback...", "info")
+
         # Run feedback generation for all 4 investor agents in parallel
         feedback_tasks = [
             self._generate_investor_feedback(inv_id, history_str, investor_summary)
             for inv_id in INVESTOR_IDS
         ]
-        feedbacks_list  = await asyncio.gather(*feedback_tasks)
+        feedbacks_raw     = await asyncio.gather(*feedback_tasks, return_exceptions=True)
+        feedbacks_list    = [f if isinstance(f, dict) else {"pros": "N/A", "cons": "N/A", "recommendation": "N/A"}
+                             for f in feedbacks_raw]
         detailed_feedback = dict(zip(INVESTOR_IDS, feedbacks_list))
 
         # Generate overall report using Vincent (financial expert) as lead analyst
