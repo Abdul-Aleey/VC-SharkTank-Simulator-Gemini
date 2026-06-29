@@ -885,6 +885,10 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             rep_name    = INVESTOR_PERSONAS[lead_id]["name"]
             offer_speech = await self._generate_offer_speech(lead_id, offer)
             self._add_to_history(lead_id, offer_speech)
+            # Flush any stale speech_done that arrived late during the previous banter
+            # (banter TTS can outlast the 60 s timeout and send its signal mid-loop).
+            while not self._speech_done_q.empty():
+                self._speech_done_q.get_nowait()
             await self._emit("offer_speech", {
                 "sender": lead_id, "senderName": rep_name,
                 "text": offer_speech, "offer": offer,

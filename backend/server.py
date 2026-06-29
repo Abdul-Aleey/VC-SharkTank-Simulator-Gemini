@@ -190,26 +190,28 @@ async def ws_simulate(websocket: WebSocket):
         except Exception:
             pass
 
-    # Use asyncio.wait so that when the WebSocket closes (send_events or recv_msgs
-    # exits early) we immediately cancel the simulation rather than letting run_sim
-    # block for up to 60 s waiting on speech_done signals that will never arrive.
-    tasks = {
-        asyncio.create_task(run_sim()),
-        asyncio.create_task(send_events()),
-        asyncio.create_task(recv_msgs()),
-        asyncio.create_task(keepalive()),
-    }
+    run_task  = asyncio.create_task(run_sim())
+    send_task = asyncio.create_task(send_events())
+    recv_task = asyncio.create_task(recv_msgs())
+    ka_task   = asyncio.create_task(keepalive())
+
     try:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        # Block until the WS is done from either side:
+        #   send_task exits when simulation finishes (got __done__) OR WS send fails.
+        #   recv_task exits when client disconnects.
+        # run_task and ka_task are NOT in this set so a keepalive hiccup or
+        # run_task finishing before send_task drains the queue never kills early.
+        await asyncio.wait({send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED)
     except Exception as exc:
         try:
             await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
         except Exception:
             pass
     finally:
+        # Cancel everything that is still running.
+        for task in (run_task, send_task, recv_task, ka_task):
+            task.cancel()
+        await asyncio.gather(run_task, send_task, recv_task, ka_task, return_exceptions=True)
         try:
             await websocket.close()
         except Exception:
