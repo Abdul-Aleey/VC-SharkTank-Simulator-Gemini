@@ -810,8 +810,7 @@ Respond naturally to the room — you are not committing to anything, just prese
 No questions. No meta-text. No quotes.
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
-            reply = await self._run_founder_agent(reply_prompt)
-            reply = reply.strip().strip('"').strip("'")
+            reply = self._strip_md(await self._run_founder_agent(reply_prompt)).strip('"').strip("'")
             if reply:
                 self._add_to_history("founder", reply)
                 await self._emit("banter", {
@@ -862,7 +861,14 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         })
 
         # Build mutable offers dict keyed by lead investor id (ADK-generated terms)
-        offers_list   = await self._build_offers(qualifying)
+        try:
+            offers_list = await self._build_offers(qualifying)
+        except Exception as exc:
+            err_msg = f"Offer generation failed: {exc}"
+            await self._log("Google ADK Orchestrator", err_msg, "error")
+            await self._emit("system_message", {"text": f"[Error] {err_msg}"})
+            await self._generate_report(deal=None)
+            return
         active_offers = {o["investors"][0]: o for o in offers_list}
 
         # Each investor speaks their offer one at a time; wait for speech_done so cards
@@ -946,7 +952,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                 counter_text = decision.get("counterText", "")
 
                 # Founder speaks their reasoning to the room
-                speech = decision.get("speech", "")
+                speech = self._strip_md(decision.get("speech", ""))
                 if speech:
                     self._add_to_history("founder", speech)
                     await self._set_founder_agent_state("PITCHING")
@@ -1257,9 +1263,9 @@ Write a genuine, excited acceptance speech (under 40 words).
 Name {investors_str} explicitly. Express what this partnership means for your startup.
 No meta-text.
 Language: {'Japanese' if self.is_ja else 'English'}"""
-            text = await self._run_founder_agent(prompt)
-            if text.strip():
-                return text.strip()
+            text = self._strip_md(await self._run_founder_agent(prompt))
+            if text:
+                return text
 
         if self.is_ja:
             return (f"ありがとうございます、{investors_str}！喜んでお受けします。"
@@ -1476,7 +1482,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
 
         await self._log(
             "Google ADK Orchestrator",
-            "Generating final evaluation report — querying all 4 investor agents...",
+            "Generating investment memo — collecting all four investor perspectives in parallel...",
             "info",
         )
 
@@ -1487,19 +1493,25 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             for i in INVESTOR_IDS
         )
 
-        await self._log("Google ADK Orchestrator", "Generating investment memo — querying all investors for final feedback...", "info")
-
-        # Run feedback generation for all 4 investor agents in parallel
+        # ── Step 1: Parallel per-investor feedback (all 4 agents) ────────────
         feedback_tasks = [
             self._generate_investor_feedback(inv_id, history_str, investor_summary)
             for inv_id in INVESTOR_IDS
         ]
-        feedbacks_raw     = await asyncio.gather(*feedback_tasks, return_exceptions=True)
-        feedbacks_list    = [f if isinstance(f, dict) else {"pros": "N/A", "cons": "N/A", "recommendation": "N/A"}
-                             for f in feedbacks_raw]
+        feedbacks_raw  = await asyncio.gather(*feedback_tasks, return_exceptions=True)
+        feedbacks_list = [
+            f if isinstance(f, dict) else {"pros": "N/A", "cons": "N/A", "recommendation": "N/A"}
+            for f in feedbacks_raw
+        ]
         detailed_feedback = dict(zip(INVESTOR_IDS, feedbacks_list))
 
-        # Generate overall report using Vincent (financial expert) as lead analyst
+        await self._log(
+            "Google ADK Orchestrator",
+            "Investor feedback collected. Synthesising final memo...",
+            "info",
+        )
+
+        # ── Step 3: Synthesis — all 4 perspectives → narrative fields ──────────
         if deal:
             deal_investors = ", ".join(
                 INVESTOR_PERSONAS[i]["name"] for i in deal.get("investors", []) if i in INVESTOR_PERSONAS
@@ -1512,99 +1524,129 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
         else:
             deal_context = "NO DEAL: Founder walked away or all offers were rejected."
 
-        report_prompt = f"""GENERATE REPORT FEEDBACK
-You are acting as a senior VC analyst, compiling a final investment memo.
+        # Format each investor's feedback for the synthesis prompt
+        feedback_lines = "\n".join(
+            f"{INVESTOR_PERSONAS[inv_id]['name']} ({INVESTOR_PERSONAS[inv_id]['focus']}):\n"
+            f"  Pros: {fb.get('pros', 'N/A')}\n"
+            f"  Cons: {fb.get('cons', 'N/A')}\n"
+            f"  Recommendation: {fb.get('recommendation', 'N/A')}"
+            for inv_id, fb in detailed_feedback.items()
+        )
+
+        synthesis_prompt = f"""SYNTHESISE INVESTMENT MEMO
+You are a neutral senior analyst compiling a final VC investment memo from four independent investor perspectives.
 
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Founder: {self.config.get('founderName')}
 Ask: {self.config.get('askAmount')} for {self.config.get('askEquity')}%
-Investor outcomes: {investor_summary}
 Deal outcome: {deal_context}
 
-Recent conversation:
-{history_str}
+Four investor verdicts:
+{feedback_lines}
+
+Based on ALL four perspectives above, produce a balanced memo that reflects the panel's collective view.
+Do NOT favour any single investor's angle. Identify patterns: what multiple sharks agreed on as strengths,
+what multiple sharks flagged as risks, and what the roadmap should look like given the panel's combined expertise.
 
 Return ONLY valid JSON, no markdown fences:
 {{
-  "readinessScore": <integer 1-10>,
   "verdict": "<Angel|Accelerator|Seed|Series A|Institutional VC|Rejected>",
-  "executiveSummary": "<2-3 sentence summary>",
-  "risks": [{{"flag": "<risk>", "weight": "<High|Medium|Low>"}}],
-  "strengths": ["<strength>"],
-  "roadmap": ["1. <step>", "2. <step>"]
+  "executiveSummary": "<2-3 sentence synthesis of the panel's collective view>",
+  "risks": [{{"flag": "<risk agreed on by multiple investors>", "weight": "<High|Medium|Low>"}}],
+  "strengths": ["<strength multiple investors highlighted>"],
+  "roadmap": ["1. <step>", "2. <step>", "3. <step>"]
 }}
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
-        raw   = await self._run_investor_agent("vincent", report_prompt)
+        raw    = await self._run_founder_agent(synthesis_prompt)
         report = self._parse_json(raw, {
-            "readinessScore":  5,
-            "verdict":         "Seed",
+            "verdict":          "Seed",
             "executiveSummary": "Simulation concluded.",
-            "risks":           [{"flag": "Market risk", "weight": "Medium"}],
-            "strengths":       ["Clear vision"],
-            "roadmap":         ["1. Build MVP", "2. Find customers"],
+            "risks":            [{"flag": "Market risk", "weight": "Medium"}],
+            "strengths":        ["Clear vision"],
+            "roadmap":          ["1. Build MVP", "2. Find customers"],
         })
 
-        # Clamp readiness score
-        score = report.get("readinessScore", 5)
-        if score > 10:
-            score = round(score / 10)
-        report["readinessScore"] = max(1, min(10, int(score)))
+        # Average readiness scores — each agent rates 1-10 from their own lens
+        raw_scores = [
+            fb["readinessScore"] for fb in feedbacks_list
+            if isinstance(fb.get("readinessScore"), (int, float))
+        ]
+        if raw_scores:
+            report["readinessScore"] = max(1, min(10, round(sum(raw_scores) / len(raw_scores))))
+        # If no agent returned a score, leave it absent — the frontend shows N/A
 
         report["detailedSharkFeedback"] = detailed_feedback
 
-        # Attach agreed term sheet
+        # ── Attach agreed term sheet ───────────────────────────────────────────
         if deal:
             report["agreedTermSheet"] = deal
         else:
             invested = [i for i in INVESTOR_IDS if self.investor_states[i]["status"] == "INVEST"]
             if invested:
-                # Safety fallback: deal exists but _close_deal wasn't called explicitly.
-                # Use the last-known offer for those investors if available, otherwise
-                # surface a minimal record so the report isn't missing a term sheet.
                 report["agreedTermSheet"] = {
                     "id":        "auto_deal",
                     "investors": invested,
                     "cash":      self.config.get("askAmount"),
                     "equity":    int(self.config.get("askEquity", 10)),
-                    "terms":     "",   # no hardcoded terms — ADK path always uses _close_deal
+                    "terms":     "",
                     "isJoint":   len(invested) > 1,
                 }
             else:
-                report["agreedTermSheet"] = None   # no deal reached
+                report["agreedTermSheet"] = None
 
-        await self._log("Google ADK Orchestrator", "Report generated. Simulation complete.", "success")
+        await self._log("Google ADK Orchestrator", "Investment memo complete. Simulation finished.", "success")
         await self._emit("report", {"data": report})
 
     async def _generate_investor_feedback(
         self, inv_id: str, history_str: str, investor_summary: str
     ) -> dict:
-        """Generate pros/cons/recommendation from one investor (run in parallel)."""
-        state = self.investor_states[inv_id]
+        """Generate pros/cons/recommendation + readiness score from one investor (run in parallel)."""
+        state  = self.investor_states[inv_id]
+        name   = INVESTOR_PERSONAS[inv_id]["name"]
+        focus  = INVESTOR_PERSONAS[inv_id]["focus"]
         prompt = f"""GENERATE REPORT FEEDBACK
-You are {INVESTOR_PERSONAS[inv_id]['name']} providing your final verdict.
+You are {name}. Your investment focus: {focus}.
+Provide your final verdict on this startup from YOUR specific angle.
 
 Startup: {self.config.get('startupName')} ({self.config.get('sector')})
 Your final confidence: {state['confidence']}%
 Your status: {state['status']}
+All investors: {investor_summary}
 
 Conversation excerpt:
 {history_str}
 
+Rate this startup's investor-readiness from YOUR lens only. You MUST give a score — never omit it.
+readinessScore MUST be a whole integer between 1 and 10, nothing else:
+  1-3  Not ready. Fundamental gaps in your focus area.
+  4-6  Shows promise but significant work needed.
+  7-8  Strong. Ready with minor gaps.
+  9-10 Exceptional. You would write the cheque today.
+
 Return ONLY valid JSON, no markdown fences:
 {{
-  "pros": "<what impressed you>",
-  "cons": "<what concerned you>",
-  "recommendation": "<your final recommendation>"
+  "readinessScore": <REQUIRED integer 1-10>,
+  "pros": "<what impressed you, from your {focus} perspective>",
+  "cons": "<what concerned you, from your {focus} perspective>",
+  "recommendation": "<your final recommendation in 1-2 sentences>"
 }}
 Language: {'Japanese' if self.is_ja else 'English'}"""
 
-        raw = await self._run_investor_agent(inv_id, prompt)
-        return self._parse_json(raw, {
+        raw    = await self._run_investor_agent(inv_id, prompt)
+        result = self._parse_json(raw, {
             "pros":           "N/A",
             "cons":           "N/A",
             "recommendation": "N/A",
         })
+        # Clamp score to 1-10 integer; if model returned e.g. 75 treat as 7
+        s = result.get("readinessScore")
+        if isinstance(s, (int, float)):
+            s = int(s)
+            if s > 10:
+                s = round(s / 10)
+            result["readinessScore"] = max(1, min(10, s))
+        return result
 
     # ─── ADK agent execution helpers ─────────────────────────────────────────
 

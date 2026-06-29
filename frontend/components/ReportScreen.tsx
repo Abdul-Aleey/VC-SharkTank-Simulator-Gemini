@@ -35,7 +35,7 @@ export default function ReportScreen({ report, config, investors, onRestart, onD
           <div className="my-4 relative">
             <div className="absolute inset-0 bg-indigo-500/20 blur-2xl rounded-full print:hidden" />
             <span className="text-7xl font-extrabold bg-gradient-to-r from-indigo-400 to-violet-400 bg-clip-text text-transparent relative z-10 print:text-slate-900">
-              {report.readinessScore}
+              {report.readinessScore ?? '—'}
             </span>
             <span className="text-xl text-slate-400 font-bold print:text-slate-600">/10</span>
           </div>
@@ -112,9 +112,16 @@ export default function ReportScreen({ report, config, investors, onRestart, onD
                     <span className="text-xl">{profile.emoji}</span>
                     <h4 className="font-bold text-slate-200 print:text-slate-900">{profile.name}</h4>
                   </div>
-                  <span className="text-xs font-bold text-indigo-400 print:text-slate-800">
-                    Confidence: {inv.confidence}%
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {feedback.readinessScore != null && (
+                      <span className="text-xs font-bold px-2 py-0.5 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-full print:text-slate-700">
+                        {feedback.readinessScore}/10
+                      </span>
+                    )}
+                    <span className="text-xs font-bold text-slate-400 print:text-slate-800">
+                      {inv.confidence}%
+                    </span>
+                  </div>
                 </div>
                 <div className="space-y-1 text-xs">
                   <p className="text-slate-300 print:text-slate-800">

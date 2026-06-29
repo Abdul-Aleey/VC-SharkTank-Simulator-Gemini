@@ -99,7 +99,7 @@ export interface SimulationConfig {
 }
 
 export interface ReportData {
-  readinessScore: number; // 1 to 10
+  readinessScore?: number; // 1-10, averaged from all 4 investor agents; absent if all agents failed
   verdict: 'Angel' | 'Accelerator' | 'Seed' | 'Series A' | 'Institutional VC' | 'Rejected';
   executiveSummary: string;
   agreedTermSheet: Offer | null;
@@ -107,6 +107,7 @@ export interface ReportData {
   strengths: string[];
   roadmap: string[];
   detailedSharkFeedback: Record<InvestorId, {
+    readinessScore?: number;
     pros: string;
     cons: string;
     recommendation: string;
