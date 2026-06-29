@@ -97,10 +97,6 @@ export default function App() {
       });
   }, []);
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chat]);
-
   // ── API key handlers ──────────────────────────────────────────────────────
   const handleSaveApiKey = async () => {
     const trimmed = apiKeyInput.trim();
