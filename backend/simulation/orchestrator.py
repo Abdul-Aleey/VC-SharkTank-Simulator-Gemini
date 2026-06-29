@@ -964,11 +964,38 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                 return
 
             # ── Get next action ────────────────────────────────────────────
+            _ai_eval_task: asyncio.Task | None = None
             if self.mode == "ai":
+                await self._log(
+                    "Founder Agent",
+                    f"Evaluating {len(active_offers)} offer(s) — deciding next move...",
+                    "info",
+                )
                 decision     = await self._ai_founder_decide_action(active_offers)
                 action_type  = decision.get("action", "accept")
                 target_id    = decision.get("investorId", list(active_offers.keys())[0])
                 counter_text = decision.get("counterText", "")
+
+                # Log decision immediately so the orchestrator panel shows progress
+                _t_name = (INVESTOR_PERSONAS[target_id]["name"]
+                           if target_id in INVESTOR_PERSONAS else target_id)
+                if action_type == "counter":
+                    await self._log(
+                        "Founder Agent",
+                        f"Will counter {_t_name} — evaluating concurrently with speech...",
+                        "info",
+                    )
+                    # Launch shark evaluation now so it overlaps with founder TTS
+                    # instead of running sequentially after the speech wait.
+                    _ai_eval_task = asyncio.create_task(
+                        self._evaluate_counter_offer(
+                            target_id, counter_text, active_offers.get(target_id, {})
+                        )
+                    )
+                elif action_type == "accept":
+                    await self._log("Founder Agent", f"Accepting {_t_name}'s offer.", "success")
+                else:
+                    await self._log("Founder Agent", "Walking away from all offers.", "info")
 
                 # Founder speaks their reasoning to the room
                 speech = self._strip_md(decision.get("speech", ""))
@@ -980,8 +1007,8 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                         "senderName": self.config.get("founderName", "Founder"),
                         "text":       speech,
                     })
-                    # Consume the speech_done the frontend sends after TTS so it
-                    # doesn't leak into the next _wait_for_speech_done (revised offer).
+                    # Consume speech_done from founder TTS so it can't leak into the
+                    # revised-offer wait. _ai_eval_task runs concurrently during this pause.
                     await self._wait_for_speech_done()
                     await self._set_founder_agent_state("IDLE")
             else:
@@ -994,9 +1021,15 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
             # Guard: target must exist in active offers
             if target_id not in active_offers:
                 target_id = list(active_offers.keys())[0]
+                # eval_task was started for the wrong target — discard it
+                if _ai_eval_task is not None:
+                    _ai_eval_task.cancel()
+                    _ai_eval_task = None
 
             # ── Process action ─────────────────────────────────────────────
             if action_type == "accept":
+                if _ai_eval_task is not None:
+                    _ai_eval_task.cancel()
                 await self._close_deal(active_offers[target_id])
                 return  # ← terminates
 
@@ -1024,9 +1057,17 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                              f"{target_name} is evaluating your counter...")
                 })
 
-                result = await self._evaluate_counter_offer(
-                    target_id, counter_text, target_offer
-                )
+                if _ai_eval_task is not None:
+                    try:
+                        result = await _ai_eval_task
+                    except Exception:
+                        result = await self._evaluate_counter_offer(
+                            target_id, counter_text, target_offer
+                        )
+                else:
+                    result = await self._evaluate_counter_offer(
+                        target_id, counter_text, target_offer
+                    )
 
                 # Shark speaks their response in their own voice
                 speech_text = self._strip_md(result.get("speech", ""))
@@ -1055,9 +1096,7 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                     active_offers[target_id] = updated
                     revised_speech = await self._generate_offer_speech(target_id, updated)
                     self._add_to_history(target_id, revised_speech)
-                    # Drain any stale speech_done from the founder's negotiation speech
-                    # (AI mode sends speech_done after founder_response TTS; nobody waits for it
-                    # in the negotiation path, so it would incorrectly satisfy this wait).
+                    # Drain any stale signals before waiting for the revised offer TTS
                     while not self._speech_done_q.empty():
                         self._speech_done_q.get_nowait()
                     await self._emit("offer_speech", {
@@ -1090,6 +1129,8 @@ Language: {'Japanese' if self.is_ja else 'English'}"""
                                      {"offers": list(active_offers.values()), "isRevision": True})
 
             else:  # walk_away — founder declines all offers
+                if _ai_eval_task is not None:
+                    _ai_eval_task.cancel()
                 await self._emit("system_message", {
                     "text": ("起業家はすべてのオファーを辞退し、タンクを去りました。"
                              if self.is_ja else
